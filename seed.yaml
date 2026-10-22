@@ -1,0 +1,333 @@
+goal: VESSEL·ACTION 매핑 문의를 로컬 Streamlit 웹 앱에서 등록하면 Python 규칙과 LLM 구조화 출력으로 자동 분류해
+  SQLite 이슈대장(ISSUE)에 기록한다. 매핑 담당자는 FastMCP 도구를 쓰는 LangGraph ReAct 조사 비서와 대화하며 열린
+  이슈를 조사한다. 비서가 만든 처리안(매핑 변경 + 상태 변경)은 담당자가 승인해야만 한 SQLite 트랜잭션으로 반영된다. 이 시스템을 C:\Users\SDS\Desktop\sds-ax-assistant에
+  그린필드로 순수 구현 12시간 안에 만들고, SDS AX Day1~7 개념(구조화 출력, ReAct 루프, MCP, 에러 메시지=프롬프트, 실패
+  분류·폴백, 승인 게이트, 마스킹, trace, 평가셋·전후 비교)을 실제로 적용한다.
+task_type: code
+brownfield_context:
+  project_type: greenfield
+  context_references: []
+  existing_patterns: []
+  existing_dependencies: []
+constraints:
+- Python 3.14, LangGraph ReAct(agent↔tools 순환 직접 조립, should_stop, finalize 노드, add_messages
+  + 체크포인터 멀티턴)
+- LLM은 AWS Bedrock Claude, .env의 BEDROCK_MODEL_IDS 우선순위 순서로 사용
+- FastMCP 서버(stdio) + langchain-mcp-adapters로 Agent가 MCP 클라이언트이며, MCP 클라이언트는 이 Agent
+  하나뿐
+- '설치 허락 라이브러리: mcp, langchain-mcp-adapters, streamlit'
+- '진행 순서: 문서(SERVICE.md → TASKS.md) 먼저, 그다음 구현'
+- '시간 예산: 순수 구현 12시간(문서 작업 제외). 부족하면 ③ 값 이상 조사·④ 반려 재요청부터 축소·연기'
+- '완성 순서: ⓪ DB·시드·이슈대장 화면 → Ⓐ 신규 등록·자동 분류 → ② 자유 질의 → ① 처리안 승인(처리대기·확인필요·이관 건 종결)
+  → ③ 값 이상 조사 → ④ 반려 건 재요청 버튼'
+- 데이터는 자체 시드 스크립트가 만든 SQLite 복사본(VESSEL_MST, ACTION_MST, VESSEL_ACTION, CUSTOMER_MST,
+  OWNER_MST, PROCESS_LOG, MESSAGE_LOG, CALL_LOG, ISSUE, RESOLUTION_LOG)이며 기존 sds-ax-project
+  데이터·코드는 수정하지 않음(분류 스키마·프롬프트 참고만 가능)
+- issues.xlsx는 쓰지 않음. 이슈대장은 SQLite ISSUE 테이블(번호, 접수일시, 요청자 ID, VESSEL_ID, ACTION_SEQ,
+  문의내용, 담당자, 처리상태, 처리결과, 처리일시, PARENT_ISSUE_NO)이며, 시드가 확인필요·이관·반려 건을 넣음
+- RESOLUTION_LOG는 append-only이고 LEDGER_APPLIED(Y/N)로 '로그만 남고 이슈 갱신이 거절된 상태'를 구분. 매핑
+  쓰기의 승인·거절·실행 결과는 Python이 자동 기록
+- 'Streamlit 로컬 웹 UI 화면 3개: (1) 이슈대장(조회·필터·상세, 행마다 ''이 건 조사'' 버튼으로 그 이슈의 비서 대화 시작)
+  (2) 신규 문의 등록 폼(VESSEL_ID·ACTION_SEQ는 마스터 목록에서 고르는 구조화 입력, 문의내용은 자유 텍스트, 처리 대상은 입력칸
+  값) (3) 조사 비서 대화 + 승인 카드'
+- 이슈대장에서 담당자가 값을 직접 고치지 않음. 변경은 Agent 처리안 + 승인으로만 반영
+- '자동 분류는 등록 즉시 실행: 1단계 Python 검사(고객 ID 없음·미등록 → 반려, 담당자 빈칸; 칸 문제(빈 값·여러 값·마스터에 없음)
+  → 반려, 매핑 담당자) → 2단계 LLM 구조화 출력 1회 → Python 규칙으로 담당자·처리상태 결정'
+- '자동 분류 규칙표: 매핑 생성·수정·삭제 → 처리대기, 매핑 담당자 / 한 문의에 요청 여러 개 → 반려, 매핑 담당자 / 값 이상 → 확인필요,
+  매핑 담당자 / 마스터 요청 대상 VESSEL → 이관, VESSEL 담당자 / 대상 ACTION → 이관, ACTION 담당자 / 대상 둘 다
+  → 이관, "VESSEL 담당자, ACTION 담당자" / 마스터 요청 대상 모름 → 반려, 매핑 담당자 / 담당 외 → 거절, 담당자 빈칸 /
+  판단 불가 → 확인필요, 매핑 담당자'
+- LLM 확신도 필드는 두지 않고 '판단 불가' 유형으로 받음
+- 분류 실패(스키마 오류·모든 모델 실패) 시 문의는 저장하고 확인필요, 매핑 담당자, 처리결과 '자동 분류 실패'로 두며 화면에 [다시 분류]
+  버튼 표시. [다시 분류]는 같은 이슈를 갱신하고 trace에 기록
+- 자동 분류 단계에서는 매핑 변경을 절대 하지 않음
+- 'MCP 도구 — 읽기 6개: find_vessel(query), find_action(query), get_vessel_mappings(vessel_id),
+  list_issues(status?, since?, limit=10), get_issue(issue_no), get_issue_trace(issue_no)(이
+  앱의 분류 기록을 읽음) / 쓰기 1개: propose_resolution(issue_no, mapping_change?, new_status,
+  result) / 로그 1개: log_resolution(issue_no, note)(append-only, 위험 등급 log, 승인 없이 자동)'
+- 도구 반환은 정해진 형식의 사람이 읽는 문자열. 오류는 예외 대신 안내 문자열(받은 값·쓸 수 있는 값·다음 행동)
+- 위험 등급은 LLM이 아니라 Python이 DB 상태로 결정. 미등록 도구는 승인 필요(fail-safe). 처리안에 EXECUTED_YN='Y'
+  매핑이 포함되면 destructive
+- TOOL_SPECS(메뉴판)와 TOOLS_IMPL(구현)을 분리하고, import 시 이름 일치를 assert
+- 조회는 자동 실행, 쓰기는 LangGraph interrupt로 사람 승인 후 실행
+- '승인 카드 표시 항목: 위험 등급·도구 이름·대상(VESSEL/ACTION 전후 값)·현재 수행 상태(EXECUTED_YN)·근거(이슈 번호와
+  문의 원문). 카드 내용은 Python이 DB에서 직접 읽은 원본'
+- '승인 UX y/n/e: y=실행, n=실행하지 않고 Agent에 ''거절됨'' 전달, e=담당자 수정 지시를 Agent에 돌려주어 다시 계획.
+  destructive는 y 뒤에 이슈 번호를 한 번 더 입력하는 이중 확인'
+- 승인 단위는 처리안(매핑 변경 + 이슈 상태 변경)이며, 매핑·ISSUE·RESOLUTION_LOG를 한 SQLite 트랜잭션으로 반영(부분 처리
+  상태 없음)
+- '실행 직전 재검증: 이슈가 아직 열린 상태인지, 대상 매핑의 존재/부재, EXECUTED_YN이 제안 시점과 같은지, new_status가 허용된
+  전이인지'
+- 매핑 수정 = 연결된 ACTION을 다른 ACTION으로 교체(삭제 후 생성, 새 행 EXECUTED_YN='N'·EXECUTED_AT=NULL).
+  Agent는 EXECUTED 값을 수정하지 않음
+- '상태 전이: 열린 건(확인필요·이관·처리대기) → 완료·반려·거절. 완료 건은 다시 열지 않음. 이관 건은 담당자 확인 후 처리안으로 ''완료''
+  처리'
+- '반려 건 ''수정해서 재요청'': 값이 채워진 등록 폼을 열고, 원래 번호를 PARENT_ISSUE_NO로 가진 새 이슈로 등록·자동 분류.
+  원래 건은 반려 유지'
+- '값 이상 조사: 매핑이 잘못 연결됐는지(올바른 ACTION으로 교체 제안), 마스터 이름·설명 불만인지(이관 성격)를 근거와 함께 판단'
+- ④ 반려 재요청 도움은 ID 후보 찾기와 고객 안내 초안을 화면에 보여 주는 데까지(발송 없음)
+- 도구 호출 상한은 한 사용자 턴당 8회이며, 승인 후 재개·재계획을 포함한 같은 턴 전체에 적용
+- '상한 도달 또는 같은 도구·같은 인자 중복 호출 → finalize: 지금까지의 근거로 답하고 ''조사 한도 도달, 확인하지 못한 것: …''과
+  다음 질문 제안 표시'
+- 같은 도구가 연속 2회 실패하면 이번 턴에 더 부르지 않고 finalize로 실패를 알림
+- Bedrock 실패 시 재시도·백오프 없이 바로 다음 모델. 모든 모델 실패 → Streamlit 오류 배너 + '다시 시도' 버튼, 대화 상태는
+  체크포인터에 보존
+- MCP 서버 연결 끊김 → 1회 재연결, 실패하면 배너
+- 대화 thread는 이슈 번호별(자유 질의는 별도 thread). 승인 대기 처리안은 그 thread의 체크포인터에 남아 다시 열면 이어짐
+- '마스킹은 trace 로그에만 적용: 모든 입력·출력에 mask_pii(전화번호·이메일·사번)와 자격증명 마스킹(_redact)을 적용한 뒤 기록.
+  LLM 입력·화면은 마스킹하지 않음'
+- '평가셋 15건: 자동 분류 4, ② 자유 질의 3, ① 처리안 승인 4(y/n/e와 destructive 이중 확인 포함), ③ 값 이상 2,
+  ④ 반려 재요청 2. 승인 케이스는 y/n/e 응답을 미리 정해 둠'
+- '안전 지표 100% 필수(가짜 LLM·실제 Bedrock 모두): 승인 없이 쓰기 0건, 거절(n) 후 DB 변화 0건, 수행된 매핑을 이중
+  확인 없이 변경 0건, 도구 호출 예산 초과 0건'
+- '정답 채점: 케이스별 필수 핵심 사실 목록 + 문자열 포함 비교. 과정 지표는 필수 도구 호출 여부만 보고 순서는 고정하지 않음'
+- 자동 분류 정답 = 담당자와 처리상태가 기대값과 정확히 일치(같은 결과를 내는 분류 유형이면 정답 인정)
+- 결과는 JSON Lines로 저장해 이전 결과와 비교. 회귀(이전 pass → 이번 fail)가 하나라도 있으면 불합격. 첫 실행이 기준선
+- 평소 개발·pytest는 도구 호출 순서를 흉내 내는 가짜 LLM만 사용. 실제 Bedrock 점검은 '실제 Bedrock 점검 목록'에 남겼다가
+  사용자가 지시할 때 한 번에 실행
+- '단계 완료 조건은 가짜 LLM pytest 통과. 최종 합격은 실제 Bedrock 기준: 자동 분류 4/4, 비서 시나리오 11건 정답 85%
+  이상, 안전 지표 100%, 회귀 0건'
+- '범위 제외: 로그인·권한 관리(담당자 1명 로컬 실행 가정), 다중 사용자 동시 접속, 실제 고객 메시지 발송, 운영 DB·실제 메신저 연결,
+  마스터(VESSEL_MST·ACTION_MST) 변경, 기존 배치 Agent 수정·연동, Claude Desktop 연동, 서버 배포'
+- '[from-user][refined]
+
+  Decision: MCP 도구 = 읽기 6개(find_vessel(query), find_action(query), get_vessel_mappings(vessel_id),
+  list_issues(status?, since?, limit=10), get_issue(issue_no), get_issue_trace(issue_no))
+  + 쓰기 4개(create_mapping(vessel_id, action_seq), update_mapping(vessel_id, action_seq,
+  new_action_seq), delete_mapping(vessel_id, action_seq), update_issue_ledger(issue_no,
+  status, result)) + 로그 1개(log_resolution(issue_no, note)).
+
+
+  Reasoning:
+
+  - 사용자: 마무리 기록을 로그에 남기는 것은 자동으로 하고, 이슈대장 갱신만 승인받고 싶다.
+
+
+  Constraints (user-stated):
+
+  - log_resolution: RESOLUTION_LOG에 append-only, 위험 등급 "log", 승인 없이 자동 실행.
+
+  - update_issue_ledger: 이슈대장 처리상태·처리결과 갱신, write 등급, 승인 필요.
+
+  - 매핑 쓰기 도구는 write 등급이며 대상 행이 EXECUTED_YN=''Y''면 destructive(이중 확인).
+
+
+  Design details (user confirmed):
+
+  - RESOLUTION_LOG에 LEDGER_APPLIED(Y/N)를 두어 로그만 남고 이슈대장 갱신이 거절된 상태를 구분한다.
+
+  - 매핑 쓰기의 승인·거절·실행 결과도 Python이 RESOLUTION_LOG에 자동 기록한다.
+
+  - 도구 반환은 정해진 형식의 사람이 읽는 문자열, 오류는 예외 대신 안내 문자열(받은 값·쓸 수 있는 값·다음 행동).
+
+  - 위험 등급은 LLM이 아니라 Python이 DB 상태로 결정, 미등록 도구는 승인 필요(fail-safe). 쓰기 도구는 실행 직전 조건 재검사.
+
+  - TOOL_SPECS(메뉴판)와 TOOLS_IMPL(구현) 분리, import 시 이름 일치 assert.'
+acceptance_criteria:
+- description: 서비스 정의 문서와 작업 계획 문서가 구현 전에 작성되어 있고, 시나리오·도구·승인 UX·멈춤 기준·실패 처리·평가 방법·범위
+    제외와 '실제 Bedrock 점검 목록'을 담고 있다
+  semantic_ac_key: ac_4f646231720ba0b4
+  verify_command: python -c "import pathlib; s=pathlib.Path('SERVICE.md').read_text(encoding='utf-8');
+    t=pathlib.Path('TASKS.md').read_text(encoding='utf-8'); assert 'propose_resolution'
+    in s and 'Bedrock' in t; print('OK')"
+  expected_artifacts:
+  - SERVICE.md
+  - TASKS.md
+  output_assertion: OK
+- description: 시드 스크립트가 기존 프로젝트를 건드리지 않고 SQLite 복사본(마스터·매핑·로그 테이블, ISSUE, LEDGER_APPLIED가
+    있는 RESOLUTION_LOG)을 만들고, 확인필요·이관·반려 이슈를 넣는다
+  semantic_ac_key: ac_a11d2faf784e5376
+  verify_command: python -m pytest -q tests/test_seed.py
+- description: Streamlit 앱에서 이슈대장 조회·필터·상세, 행별 '이 건 조사'로 해당 이슈 thread의 비서 대화 시작, 마스터
+    목록 기반 신규 문의 등록 폼이 동작하고, 대장에서 값을 직접 고칠 수 없다
+  semantic_ac_key: ac_22d52934df999e88
+  verify_command: python -m pytest -q tests/test_ui.py
+- description: 신규 문의 등록 시 Python 사전 검사, LLM 구조화 출력 1회, 규칙표로 담당자·처리상태가 정해지고 매핑은 바뀌지
+    않는다. 분류 실패 시 '자동 분류 실패' 확인필요로 저장되고, [다시 분류]가 같은 이슈를 갱신하며 trace에 남는다(가짜 LLM)
+  semantic_ac_key: ac_7e78732b9c03c96d
+  verify_command: python -m pytest -q tests/test_classify.py
+- description: 조사 비서가 MCP(stdio) 읽기 도구로 자유 질의(이름으로 ID 찾기 포함)와 값 이상 원인 조사(매핑 오류/마스터
+    문제 판단)에 근거를 들어 답한다. 도구 오류는 안내 문자열로 돌아오고, TOOL_SPECS와 TOOLS_IMPL의 이름이 일치한다(가짜 LLM)
+  semantic_ac_key: ac_b6274c6e5c19a606
+  verify_command: python -m pytest -q tests/test_agent_read.py
+- description: 처리안은 interrupt 승인 카드(위험 등급·도구·전후 값·EXECUTED_YN·근거)로 멈춘다. y면 실행 직전 재검증
+    후 매핑·ISSUE·RESOLUTION_LOG가 한 트랜잭션으로 반영되고, n이면 DB 변화 없이 거절이 기록되며, e면 다시 계획한다. destructive
+    처리안은 이슈 번호 이중 확인 없이 반영되지 않는다(가짜 LLM)
+  semantic_ac_key: ac_41b78596d4fdbc49
+  verify_command: python -m pytest -q tests/test_approval.py
+- description: 턴당 도구 호출 8회 상한(승인 후 재개 포함), 중복 호출, 같은 도구 연속 2회 실패 시 finalize로 한계와 다음
+    질문 제안을 보여 준다. Bedrock 실패 시 다음 모델로 폴백하고 전부 실패하면 배너를 띄우며 상태를 보존한다. MCP 끊김은 1회 재연결한다
+  semantic_ac_key: ac_f85010d698aac5c8
+  verify_command: python -m pytest -q tests/test_stop_and_failure.py
+- description: trace 로그의 모든 입력·출력에서 전화번호·이메일·사번과 자격증명이 마스킹되어 기록된다
+  semantic_ac_key: ac_bf46f09c5eabcbec
+  verify_command: python -m pytest -q tests/test_trace_masking.py
+- description: 반려 건에서 ID 후보와 고객 안내 초안을 화면에 보여 주고, '수정해서 재요청'으로 원래 번호를 PARENT_ISSUE_NO로
+    가진 새 이슈가 등록·자동 분류되며 원래 건은 반려로 남는다
+  semantic_ac_key: ac_e43e4cdd8b50f998
+  verify_command: python -m pytest -q tests/test_reapply.py
+- description: 15건 평가셋과 평가 실행기가 있다. 가짜 LLM 실행에서 안전 지표 4종이 100%이고, 결과는 JSON Lines로
+    저장되며 이전 결과와 케이스 단위로 비교해 회귀를 판정한다
+  semantic_ac_key: ac_14f9e1dc91c4d656
+  verify_command: python -m pytest -q tests/test_eval_runner.py
+  expected_artifacts:
+  - eval/cases.jsonl
+- description: 사용자 지시로 실행한 실제 Bedrock 최종 평가에서 자동 분류 4/4 일치, 비서 시나리오 11건 정답 85% 이상,
+    안전 지표 100%, 회귀 0건을 달성한다
+  semantic_ac_key: ac_cca3c6dfea539728
+  verify_exemption_reason: 실제 Bedrock 호출은 일일 한도 때문에 사용자가 지시할 때만 실행하므로 자동 검증 명령으로 판정할
+    수 없다
+- description: '[from-user] 성공 판정(추천안 채택):
+
+    - 평가셋 약 20건: ② 자유 질의 6, ③ 값 이상 조사 5, ① 확인필요 마무리 5, ④ 반려 재요청 4. 승인이 필요한 케이스는 y/n/e
+    응답을 케이스에 미리 정해 둔다.
+
+    - 안전 지표(100% 필수, 가짜 LLM 테스트와 실제 Bedrock 모두): 승인 없이 쓰기 0건, 거절(n) 후 DB 변화 0건, 수행된
+    매핑을 이중 확인 없이 변경 0건, 도구 호출 예산 초과 0건.
+
+    - 정답 지표(실제 Bedrock, 85% 이상): 최종 답의 핵심 사실(찾은 ID, 원인 분류, 제안 처리)이 기대값과 일치.
+
+    - 과정 지표: 도구 호출 순서는 고정하지 않고 ''필수 도구를 불렀는가''만 본다.
+
+    - 전후 비교: 결과를 파일(JSON Lines)로 저장하고 이전 결과와 비교해 회귀가 하나라도 있으면 불합격.
+
+    - Bedrock 호출 규칙(기존 프로젝트와 같음): 평소 개발·pytest는 도구 호출 순서를 흉내 내는 가짜 LLM만 쓴다. 실제 Bedrock은
+    시나리오 완성 시 점검과 최종 평가 때만, 사용자가 지시할 때 부른다.'
+  semantic_ac_key: ac_58dcce9adc98f73d
+- description: '[from-user][refined]
+
+    Decision: 목표 문장 승인 — "VESSEL·ACTION 매핑 문의를 로컬 Streamlit 웹 앱에서 등록하면 Python 규칙과
+    LLM 구조화 출력으로 자동 분류해 SQLite 이슈대장에 기록하고, 매핑 담당자는 MCP 도구를 쓰는 LangGraph ReAct 조사 비서와
+    대화하며 열린 이슈를 조사하고, 비서가 만든 처리안(매핑 변경 + 상태 변경)을 승인해야만 한 트랜잭션으로 반영되는 시스템을 12시간 안에
+    만든다."
+
+
+    Constraints (세부 기본값, 사용자에게 제시 후 승인):
+
+    - 매핑 수정 = 연결된 ACTION을 다른 ACTION으로 교체(삭제 후 생성, 새 행 EXECUTED_YN=''N''·EXECUTED_AT=NULL).
+    EXECUTED 값은 Agent가 수정하지 않는다.
+
+    - 값 이상 = 고객이 "값이 이상하다"고 한 문의. 매핑이 잘못 연결됐는지(올바른 ACTION으로 교체 제안) 마스터 이름·설명 불만인지(이관
+    성격) 조사한다.
+
+    - 등록 폼: VESSEL_ID·ACTION_SEQ는 마스터 목록에서 고르는 구조화 입력칸, 문의내용은 자유 텍스트. 처리 대상은 입력칸 값.
+
+    - 이관 건은 담당자 확인 후 처리안으로 "완료" 처리해 닫는다.
+
+    - 채점: 케이스별 필수 핵심 사실 목록 + 문자열 포함 비교. 회귀는 케이스 단위(이전 pass → 이번 fail). 첫 실행이 기준선.
+
+    - 도구 호출 예산 8회는 승인 후 재개·재계획을 포함한 같은 사용자 턴 전체에 적용.
+
+    - 실행 직전 재검증: 이슈가 아직 열린 상태, 대상 매핑 존재/부재, EXECUTED_YN이 제안 시점과 동일, new_status가 허용된
+    전이.
+
+    - 대화 thread는 이슈 번호별(자유 질의는 별도 thread). 승인 대기 처리안은 그 thread의 체크포인터에 남아 다시 열면 이어진다.
+
+    - [다시 분류]는 같은 이슈를 갱신하고 trace에 기록한다.'
+  semantic_ac_key: ac_71024868d9ac9fd5
+assumptions:
+- 테스트 파일 경로(tests/test_*.py), 시드 스크립트, 평가 파일 경로(eval/)는 예시 이름이며 구현 시 실제 구조에 맞게 바꿀
+  수 있음
+- Streamlit 화면 테스트는 streamlit.testing.v1.AppTest를 쓴다고 가정
+- 고객 안내 초안의 고객 이름은 화면 표시 단계에서 Python이 채우는 방식을 유지(LLM 입력 마스킹은 제외됐지만 고객을 ID로 넘기는 방식은
+  유지 가능)
+- '''실제 Bedrock 점검 목록''은 저장소 안의 문서 파일(예: TASKS.md의 한 섹션)로 관리'
+- log_resolution의 위험 등급 'log'는 승인 없이 실행되지만 도구 호출 예산 8회에는 포함
+ontology_schema:
+  name: MappingIssueResolution
+  description: VESSEL·ACTION 매핑 문의 이슈의 등록·자동 분류부터 조사 비서의 처리안, 승인, 트랜잭션 반영, 기록, 평가까지를
+    나타내는 도메인 모델
+  fields:
+  - name: issue
+    type: object
+    description: 'ISSUE 행: 번호, 접수일시, 요청자 ID, VESSEL_ID, ACTION_SEQ, 문의내용, 담당자, 처리상태(확인필요·이관·처리대기·완료·반려·거절),
+      처리결과, 처리일시, PARENT_ISSUE_NO'
+    required: true
+  - name: classification
+    type: object
+    description: '자동 분류 결과: 사전 검사 결과, LLM 분류 유형(판단 불가 포함), 규칙으로 정한 담당자·처리상태, 실패 여부'
+    required: true
+  - name: vessel_action_mapping
+    type: object
+    description: 'VESSEL_ACTION 행: VESSEL_ID, ACTION_SEQ, EXECUTED_YN, EXECUTED_AT'
+    required: true
+  - name: resolution_proposal
+    type: object
+    description: 'propose_resolution 처리안: issue_no, mapping_change(create/update/delete,
+      전후 값), new_status, result, 위험 등급(write/destructive), 제안 시점 EXECUTED_YN'
+    required: true
+  - name: approval_decision
+    type: object
+    description: 담당자 응답 y/n/e, 수정 지시 텍스트, destructive 이중 확인용 이슈 번호
+    required: true
+  - name: resolution_log
+    type: array
+    description: 'RESOLUTION_LOG append-only 항목: issue_no, note, 승인·거절·실행 결과, LEDGER_APPLIED(Y/N)'
+    required: true
+  - name: tool_call_budget
+    type: number
+    description: 현재 사용자 턴의 누적 도구 호출 수(상한 8, 승인 후 재개 포함)
+    required: true
+  - name: thread_id
+    type: string
+    description: 체크포인터 대화 thread 키(이슈 번호별, 자유 질의는 별도)
+    required: true
+  - name: trace_record
+    type: object
+    description: 마스킹(mask_pii, _redact)된 입력·출력과 분류·재분류 기록
+    required: true
+  - name: eval_case
+    type: object
+    description: '평가 케이스: 시나리오, 입력, 미리 정한 y/n/e, 필수 핵심 사실 목록, 필수 도구, 기대 담당자·처리상태'
+    required: true
+  - name: eval_result
+    type: object
+    description: 'JSON Lines 결과 행: case_id, pass 여부, 안전 지표 위반, 실행 모드(fake/bedrock)'
+    required: true
+evaluation_principles:
+- name: 승인 게이트 안전성
+  description: 승인 없는 쓰기 0건, 거절 후 DB 변화 0건, 이중 확인 없는 destructive 변경 0건, 예산 초과 0건
+  weight: 1.0
+- name: 트랜잭션 원자성과 재검증
+  description: 처리안은 실행 직전 재검증 후 한 트랜잭션으로 반영되고, 부분 처리 상태가 없다
+  weight: 0.9
+- name: 자동 분류 정확성
+  description: 규칙표대로 담당자·처리상태가 정해지고, 실패 시 확인필요로 안전하게 떨어진다
+  weight: 0.85
+- name: 조사 답변 정답성
+  description: 최종 답의 핵심 사실(ID, 원인 분류, 제안 처리)이 기대값과 일치하고 근거가 있다
+  weight: 0.8
+- name: 실패 처리와 멈춤
+  description: 상한·중복·연속 실패·모델 오류·MCP 끊김에서 정해진 방식으로 멈추거나 폴백하고 상태를 보존한다
+  weight: 0.75
+- name: 범위·데이터 격리 준수
+  description: 기존 프로젝트·마스터를 바꾸지 않고, 제외 항목을 구현하지 않으며, trace 마스킹을 지킨다
+  weight: 0.7
+- name: 회귀 없음
+  description: 이전 pass 케이스가 이번에 fail하지 않는다
+  weight: 0.7
+exit_conditions:
+- name: 단계 완료
+  description: 완성 순서의 각 단계는 가짜 LLM pytest 통과로 완료
+  criteria: 해당 단계 테스트 파일이 모두 통과하고, 필요한 Bedrock 점검은 점검 목록에 기록됨
+- name: 최종 합격
+  description: 사용자 지시로 실행한 실제 Bedrock 최종 평가 통과
+  criteria: 자동 분류 4/4, 비서 시나리오 11건 정답 85% 이상, 안전 지표 100%, 회귀 0건
+- name: 시간 예산 소진
+  description: 순수 구현 12시간 도달
+  criteria: ③·④를 축소·연기하고, 완료된 단계와 남은 작업을 TASKS.md에 기록한 뒤 종료
+- name: 안전 위반 발견
+  description: 안전 지표 위반이 하나라도 발생
+  criteria: 합격 처리하지 않고 수정 후 재평가
+metadata:
+  seed_id: seed_44adea522f5e
+  version: 1.0.0
+  created_at: '2026-10-22T09:04:57.846123Z'
+  ambiguity_score: 0.1
+  gate_forced: false
+  interview_id: interview_20261022_083241
+  parent_seed_id: null
+  generation_mode: normal
+  degraded: false
+  unresolved_slots: []
+  recovery_reason: null
