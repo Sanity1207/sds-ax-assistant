@@ -21,3 +21,6 @@ __pycache__/
 # 개발 모드 설치(pip install -e .) 부산물
 *.egg-info/
 build/
+
+# 평가 실행기의 작업 DB(케이스마다 시드로 다시 만든다)
+eval/work/
