@@ -13,7 +13,7 @@
 
 ## 묶음 0 · 문서 (구현 시간 제외)
 
-- [ ] **T00 SERVICE.md 작성** — 시나리오(Ⓐ②①③④), MCP 도구 8개 명세, 승인 UX(y/n/e·이중 확인), 멈춤 기준, 실패 처리, 평가 방법, 범위 제외, 시드 이슈 9건의 문의 문구·대상 값 확정. `docs/ref_old_SERVICE.md`는 형식만 참고.
+- [x] **T00 SERVICE.md 작성** — 시나리오(Ⓐ②①③④), MCP 도구 8개 명세, 승인 UX(y/n/e·이중 확인), 멈춤 기준, 실패 처리, 평가 방법, 범위 제외, 시드 이슈 9건의 문의 문구·대상 값 확정. `docs/ref_old_SERVICE.md`는 형식만 참고.
   - 확인: `python -c "import pathlib; s=pathlib.Path('SERVICE.md').read_text(encoding='utf-8'); t=pathlib.Path('TASKS.md').read_text(encoding='utf-8'); assert 'propose_resolution' in s and 'Bedrock' in t; print('OK')"` 가 OK
 
 ## 묶음 1 · 최소 경로 (입력 → 최종 답변 한 줄기)
@@ -172,6 +172,7 @@ Claude Code로 구현하는 기준이다. 작업당 15~25분(작성 + 가짜 LLM
 - 2026-10-23 T33 완료: eval/cases.jsonl 15건(자동 분류 4: 매핑 생성·VESSEL 이관·ID 불일치 반려·지시문 섞인 문의 / ② 3: 이름→ID·ACTION 개수·날씨 거절 / ① 4: #2 생성 y·#3 수정 편집 후 y·#4 삭제 이중 확인·#7 이관 완료 / ③ 2: #5 매핑 오류·이름 불만 이관 성격 / ④ 2: #8 ID 후보·#9 안내 초안). app/evaluate.py load_cases·validate_case, `python -m app.evaluate --check`. tests/test_eval_runner.py 3건
 - 2026-10-23 T34 완료: app/evaluate.py run_case·run_eval(분류 함수·비서 그래프 직접 호출, 케이스마다 eval/work/ 평가 전용 DB를 시드로 초기화, fake/bedrock), 응답마다 업무 데이터 스냅숏 차이로 안전 지표 6종 판정, judge(분류 = 처리상태·담당자, 비서 = 필수 사실·필수 도구·처리안 내용·끝난 상태), 결과 JSON Lines(eval/results/<시각>_<모드>.jsonl: case_id·pass·violations·mode·models·run_ids). 가짜 모드 15건 전부 통과·위반 0. tests/test_eval_runner.py -k 'run or safety' 11건
 - 2026-10-23 T35 완료: compare(이번에 돌린 케이스만, 이전 pass → 이번 fail = 회귀, 이전 결과 없으면 기준선), latest_results(같은 모드의 최근 결과)·--baseline, --case로 그 케이스만 다시 실행, 종료 코드 0 합격·2 불합격·1 입력 오류. tests/test_eval_runner.py 전체 18건
+- 2026-10-23 T00 완료: SERVICE.md(시나리오 Ⓐ②①③④, MCP 도구 8개 명세, 승인 UX, 멈춤 기준, 실패 처리, 처리 기록, 평가 방법, 범위 제외, 시드 이슈 9건 문구 확정). 원래 구현 전 작업이었으나 구현을 끝낸 뒤 구현과 맞춰 작성
 
 ## 실제 Bedrock 점검 목록
 
