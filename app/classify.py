@@ -151,7 +151,27 @@ def _field_problem(label: str, value, table: str, key: str, name: str, conn: sql
     return None
 
 
-def precheck(requester_id, vessel_id, action_seq, inquiry, conn: sqlite3.Connection) -> list[str]:
+def can_reapply(issue: sqlite3.Row | dict, user_id: str) -> bool:
+    """[수정해서 재요청] 대상: 반려 건이고, 지금 사용자가 그 건의 원래 요청자 본인."""
+    return issue["STATUS"] == "반려" and issue["REQUESTER_ID"] == user_id
+
+
+def _parent_problem(parent_issue_no, requester_id, conn: sqlite3.Connection) -> str | None:
+    """재요청의 원래 번호 검사: 있는 이슈, 반려 상태, 요청자 본인."""
+    if not isinstance(parent_issue_no, int) or isinstance(parent_issue_no, bool):
+        return f"원래 번호가 올바르지 않습니다(받은 값: {parent_issue_no!r})."
+    parent = conn.execute("SELECT * FROM ISSUE WHERE ISSUE_NO = ?", (parent_issue_no,)).fetchone()
+    if parent is None:
+        return f"원래 번호 #{parent_issue_no}의 이슈가 없습니다."
+    if parent["STATUS"] != "반려":
+        return f"원래 번호 #{parent_issue_no}는 {parent['STATUS']} 상태입니다. 반려 건만 수정해서 재요청할 수 있습니다."
+    if parent["REQUESTER_ID"] != requester_id:
+        return f"#{parent_issue_no}는 {parent['REQUESTER_ID']}가 요청한 건입니다. 원래 요청자 본인만 재요청할 수 있습니다."
+    return None
+
+
+def precheck(requester_id, vessel_id, action_seq, inquiry, conn: sqlite3.Connection,
+             parent_issue_no: int | None = None) -> list[str]:
     """등록 전 Python 검사. 문제가 있으면 사유 문장 목록(모든 문제를 한 번에), 없으면 빈 목록. LLM은 부르지 않는다.
 
     폼에서는 생길 수 없는 경우(요청자 없음·여러 값·마스터에 없음)도 검사한다. 등록 함수를 직접 부르는 평가·테스트
@@ -168,6 +188,8 @@ def precheck(requester_id, vessel_id, action_seq, inquiry, conn: sqlite3.Connect
             reasons.append(problem)
     if not str(inquiry or "").strip():
         reasons.append("문의내용이 비어 있습니다. 요청 내용을 적어 주세요.")
+    if parent_issue_no is not None and (problem := _parent_problem(parent_issue_no, requester_id, conn)):
+        reasons.append(problem)
     return reasons
 
 
@@ -213,19 +235,21 @@ def result_text(c: Classification, rule: Rule | None = None) -> str:
 
 
 def register_issue(requester_id: str, vessel_id: str, action_seq: str, inquiry: str,
-                   llm: FallbackLLM | None = None, conn: sqlite3.Connection | None = None) -> ClassifyOutcome:
+                   llm: FallbackLLM | None = None, conn: sqlite3.Connection | None = None, *,
+                   parent_issue_no: int | None = None) -> ClassifyOutcome:
     """문의를 ISSUE에 저장하고 바로 자동 분류한다.
 
     등록 전 검사(precheck): 요청자가 없거나 등록 권한(요청 고객·관리자)이 없거나, VESSEL_ID·ACTION_SEQ가
     빈 값·여러 값·마스터에 없음이면 저장하지 않고 RegistrationRejected. 처리 기록에는 ISSUE_NO 없이 '등록 거부' 실행.
+    parent_issue_no를 주면 [수정해서 재요청]: 원래 건이 반려이고 요청자 본인이어야 하며, 원래 건은 바꾸지 않는다.
     """
     own = conn is None
     conn = conn or connect()
     try:
         with start_run("문의 등록", "SYSTEM") as run:
             submitted = {"requester_id": requester_id, "vessel_id": vessel_id, "action_seq": action_seq,
-                         "inquiry": inquiry}
-            reasons = precheck(requester_id, vessel_id, action_seq, inquiry, conn)
+                         "inquiry": inquiry, "parent_issue_no": parent_issue_no}
+            reasons = precheck(requester_id, vessel_id, action_seq, inquiry, conn, parent_issue_no)
             if reasons:
                 run.event("branch", "등록 전 검사", submitted, "거부: " + " / ".join(reasons))
                 run.finish("등록 거부")
@@ -236,9 +260,9 @@ def register_issue(requester_id: str, vessel_id: str, action_seq: str, inquiry: 
                 # 분류가 끝나기 전에 앱이 멈춰도 [다시 분류]로 이어갈 수 있도록 '자동 분류 실패' 확인필요로 먼저 저장한다.
                 issue_no = conn.execute(
                     "INSERT INTO ISSUE (RECEIVED_AT, REQUESTER_ID, VESSEL_ID, ACTION_SEQ, INQUIRY, OWNER_ROLE, STATUS,"
-                    " RESULT) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    " RESULT, PARENT_ISSUE_NO) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (now_kst(), requester_id, vessel_id, action_seq, inquiry, UNDECIDED[1], UNDECIDED[0],
-                     FAILED_RESULT),
+                     FAILED_RESULT, parent_issue_no),
                 ).lastrowid
             run.set_issue(issue_no)
             return _classify(issue_no, llm, conn, run)

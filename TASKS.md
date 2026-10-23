@@ -99,7 +99,7 @@
 
 ## 묶음 7 · ④ 반려 건 재요청 (시간 부족 시 두 번째로 축소)
 
-- [ ] **T31 [수정해서 재요청]** — 원래 요청자 본인에게만 버튼, 값이 채워진 등록 폼, PARENT_ISSUE_NO를 가진 새 이슈로 등록·자동 분류, 원래 건 반려 유지.
+- [x] **T31 [수정해서 재요청]** — 원래 요청자 본인에게만 버튼, 값이 채워진 등록 폼, PARENT_ISSUE_NO를 가진 새 이슈로 등록·자동 분류, 원래 건 반려 유지.
   - 확인: `pytest -q tests/test_reapply.py -k reapply` — 다른 사용자에게 버튼 없음, 새 이슈 PARENT_ISSUE_NO 일치, 원래 건 상태 불변
 - [ ] **T32 ID 후보·고객 안내 초안** — 비서가 ID 후보와 안내 초안을 답변으로 표시, MESSAGE_LOG 기록, 고객 이름은 화면 단계에서 Python이 채움(발송 없음).
   - 확인: `pytest -q tests/test_reapply.py` 전체 — 초안에 고객 이름·후보 ID 포함, MESSAGE_LOG 행 존재
@@ -166,6 +166,7 @@ Claude Code로 구현하는 기준이다. 작업당 15~25분(작성 + 가짜 LLM
 - 2026-10-23 T29 완료: 조사 비서 화면에 승인 카드(위험 등급 강조, 근거·전후 값·EXECUTED_YN·처리결과), [승인]/[취소]/[직접 편집], 이중 확인 입력 폼, 편집 폼(종류·VESSEL·ACTION·바꿀 ACTION은 마스터 목록, 새 상태는 완료·반려·거절, 설명). 다시 묻기 안내는 카드 위 경고. 대화창 y/n/e도 같은 뜻. 데모 가짜 LLM이 get_issue → propose_resolution으로 처리안을 만듦. tests/test_ui.py -k approval 5건
 - 2026-10-23 묶음 5(T24~T29) 완료: 결정 사항은 REPORT_묶음5.md
 - 2026-10-23 T30 완료(묶음 6): 비서 프롬프트 v3에 [값 이상 조사](매핑 오류 → 교체 처리안 / 마스터 이름·설명 불만 → 처리안 없이 log_resolution + '이관 성격'). 가짜 시나리오 2건(시드 #5 → V001 103→104 교체 카드, 새 값 이상 문의 → note + 이관 성격 답). 시간 예산 안이라 축소하지 않음. tests/test_agent_read.py -k anomaly 3건. 보고서 REPORT_묶음6.md
+- 2026-10-23 T31 완료: register_issue(parent_issue_no=)·precheck가 원래 건(있음·반려·요청자 본인)을 검사, PARENT_ISSUE_NO 저장. 이슈대장 상세에 반려 건의 원래 요청자 본인에게만 [수정해서 재요청], 값이 채워진 등록 폼(재요청 안내·그만두기). 원래 건 불변. tests/test_reapply.py -k reapply 10건
 
 ## 실제 Bedrock 점검 목록
 

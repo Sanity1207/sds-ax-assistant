@@ -24,8 +24,8 @@ from app.agent import (CARD_QUESTION, CONFIRM_QUESTION, MODE_NAMES, REQUEST_TAG,
                        open_thread, pending_approval, retry_turn, run_turn)
 from app.resolution import CLOSED_TARGETS  # noqa: E402
 from app.auth import DEFAULT_USER, PermissionDenied, can, get_user, selectable_users  # noqa: E402
-from app.classify import (FAILED_RESULT, ReclassifyNotAllowed, RegistrationRejected, can_reclassify,  # noqa: E402
-                          classify_issue, register_issue)
+from app.classify import (FAILED_RESULT, ReclassifyNotAllowed, RegistrationRejected, can_reapply,  # noqa: E402
+                          can_reclassify, classify_issue, register_issue)
 from app.db import STATUSES, connect  # noqa: E402
 from app.llm import LLMError  # noqa: E402
 
@@ -50,6 +50,26 @@ def start_investigation(issue_no: int) -> None:
     """[이 건 조사] 버튼 콜백: 조사 비서 화면으로 옮기고 첫 조사 요청을 예약한다."""
     st.session_state.page = "조사 비서"
     st.session_state.chat_issue = issue_no
+
+
+def start_reapply(issue_no: int) -> None:
+    """[수정해서 재요청] 콜백: 원래 건의 값이 채워진 등록 폼으로 옮긴다."""
+    row = query("SELECT * FROM ISSUE WHERE ISSUE_NO = ?", (issue_no,))[0]
+    st.session_state.page = "신규 문의 등록"
+    st.session_state.reapply_parent = issue_no
+    st.session_state.reg_vessel = row["VESSEL_ID"]
+    st.session_state.reg_action = row["ACTION_SEQ"]
+    st.session_state.reg_inquiry = row["INQUIRY"]
+
+
+def stop_reapply() -> None:
+    st.session_state.reapply_parent = None
+
+
+def leave_menu() -> None:
+    """메뉴로 화면을 바꾸면 선택된 이슈·재요청 상태를 비운다."""
+    leave_issue_chat()
+    stop_reapply()
 
 
 def leave_issue_chat() -> None:
@@ -125,6 +145,10 @@ def show_issue_detail(issue_no: int, admin: bool) -> None:
     if history:
         st.markdown("**처리 이력**")
         st.markdown("\n".join(f"- {h['LOGGED_AT']} · {h['KIND']} · {h['USER_ID']} · {h['CONTENT']}" for h in history))
+    # [수정해서 재요청]은 반려 건의 원래 요청자 본인에게만 보인다.
+    user_id = st.session_state.current_user
+    if can_reapply(r, user_id) and can(current_user()["ROLE"], "register"):
+        st.button("수정해서 재요청", key=f"reapply_{issue_no}", on_click=start_reapply, args=(issue_no,))
     if admin:
         st.button("이 건 조사", key=f"investigate_{issue_no}", on_click=start_investigation, args=(issue_no,))
         # [다시 분류]는 관리자에게만, 자동 분류 실패로 확인필요인 건에만 보인다.
@@ -161,6 +185,11 @@ def page_register() -> None:
     vessels = {r["VESSEL_ID"]: r["VESSEL_NAME"] for r in query("SELECT * FROM VESSEL_MST ORDER BY VESSEL_ID")}
     actions = {r["ACTION_SEQ"]: r["ACTION_DESCRIPTION"] for r in query("SELECT * FROM ACTION_MST ORDER BY ACTION_SEQ")}
     user_id = st.session_state.current_user
+    parent = st.session_state.get("reapply_parent")
+    if parent is not None:
+        left, right = st.columns([4, 1])
+        left.info(f"반려된 #{parent}을(를) 수정해서 재요청합니다. 원래 건은 반려로 남고 새 번호로 접수됩니다.")
+        right.button("재요청 그만두기", key="reapply_stop", on_click=stop_reapply)
     with st.form("register", clear_on_submit=True):
         st.text_input("요청자 ID", value=user_id, disabled=True)
         vessel_id = st.selectbox("VESSEL_ID", list(vessels), index=None, placeholder="VESSEL 선택",
@@ -176,11 +205,13 @@ def page_register() -> None:
         return
     with st.spinner("자동 분류 중…"):
         try:
-            out = register_issue(user_id, vessel_id, action_seq, inquiry.strip())
+            out = register_issue(user_id, vessel_id, action_seq, inquiry.strip(), parent_issue_no=parent)
         except RegistrationRejected as e:
             st.error("등록하지 않았습니다.\n\n" + "\n".join(f"- {r}" for r in e.reasons))
             return
-    st.success(f"접수됨 #{out.issue_no}, 처리상태: {out.status}, 처리결과: {out.result}")
+    st.session_state.reapply_parent = None
+    st.success(f"접수됨 #{out.issue_no}, 처리상태: {out.status}, 처리결과: {out.result}"
+               + (f" (원래 번호 #{parent})" if parent is not None else ""))
     if out.result == FAILED_RESULT:
         # 분류 실패는 배너(오류)가 아니라 안내로만 알린다. 문의는 저장됐고 관리자가 [다시 분류]할 수 있다.
         st.info("자동 분류를 하지 못해 확인필요로 접수했습니다. 매핑 담당자가 확인하거나 이슈대장에서 [다시 분류]할 수 있습니다.")
@@ -377,7 +408,7 @@ def main() -> None:
     pages = [p for p, action in PAGES.items() if can(role, action)]
     if st.session_state.get("page") not in pages:  # 권한이 없는 화면에 있던 채로 사용자를 바꾸면 이슈대장으로
         st.session_state.page = pages[0]
-    page = st.sidebar.radio("화면", pages, key="page", on_change=leave_issue_chat)
+    page = st.sidebar.radio("화면", pages, key="page", on_change=leave_menu)
     {"이슈대장": page_ledger, "신규 문의 등록": page_register, "조사 비서": page_assistant}[page]()
 
 
