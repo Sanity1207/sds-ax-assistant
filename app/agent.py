@@ -62,7 +62,7 @@ from app.resolution import (build_card, card_text, check_proposal, done_text, ex
 from app.tools import READ_TOOLS, TOOL_SPECS
 
 PROMPT_NAME = "assistant"
-PROMPT_VERSION = "3"
+PROMPT_VERSION = "4"
 
 # 업무와 무관한 주제에 쓰는 정해진 거절 문장(1차 구현은 시스템 프롬프트로 처리, 나중에 의도 라우터를 guard 체인에 붙일 수 있음).
 OFF_TOPIC_REPLY = "죄송하지만 저는 VESSEL·ACTION 매핑과 이슈 조사에 관한 질문만 도와드릴 수 있습니다."
@@ -109,7 +109,14 @@ ACTION 이름도 확인) 원인을 둘 중 하나로 판단합니다. 어떤 매
 1. 매핑 오류: VESSEL에 잘못된 ACTION이 연결되어 있다 → 올바른 ACTION으로 교체하는 처리안(매핑 수정, 새 상태 완료)을 만듭니다.
 2. 마스터 이름·설명 불만: 매핑은 맞고 VESSEL·ACTION의 이름이나 설명이 문제다 → 마스터는 매핑 담당자가 바꿀 수 없는
    이관 성격이므로 처리안을 만들지 않고, log_resolution으로 판단 근거와 맡을 담당(VESSEL 담당자 또는 ACTION 담당자)을 남긴 뒤
-   '이관 성격'이라고 답합니다."""
+   '이관 성격'이라고 답합니다.
+
+[반려 건 재요청 도움]
+반려 건(닫힌 이슈 대화)에서는 두 가지를 돕습니다. 보내는 기능은 없으며 화면에 보여 주기만 합니다.
+1. ID 후보 찾기: 문의내용에 적힌 이름·설명으로 find_vessel·find_action을 불러, 고객이 고를 올바른 VESSEL_ID·ACTION_SEQ 후보를
+   'V002 반응기 B'처럼 ID와 이름으로 목록을 만들어 보여 줍니다.
+2. 고객 안내 초안: 요청하면 고객에게 보낼 안내문 초안을 씁니다. 반려 사유, 올바른 ID 후보, 이슈대장의 [수정해서 재요청]으로
+   다시 접수하는 방법을 담습니다. 고객 이름은 쓰지 말고 자리표시 {{고객:요청자 ID}}(예: {{고객:C003}})를 쓰면 화면에서 이름으로 채워집니다."""
 
 OPEN_STATUSES = ("확인필요", "이관", "처리대기")
 CLOSED_STATUSES = ("완료", "반려", "거절")
@@ -159,6 +166,24 @@ def _text(content) -> str:
     for block in content or []:
         parts.append(block.get("text", "") if isinstance(block, dict) else str(block))
     return "\n".join(parts)
+
+
+# 고객 안내 초안의 고객 자리표시. LLM에는 고객 ID만 넘기고, 이름은 화면 표시 단계에서 Python이 채운다.
+_CUSTOMER = re.compile(r"\{고객:([A-Za-z0-9_]+)\}")
+
+
+def fill_customer_names(text: str) -> str:
+    """'{고객:C003}' → '박지훈'(USER_MST의 이름). 없는 ID는 그대로 둔다."""
+    ids = set(_CUSTOMER.findall(text or ""))
+    if not ids:
+        return text
+    conn = connect()
+    try:
+        names = {r["USER_ID"]: r["USER_NAME"] for r in conn.execute(
+            f"SELECT USER_ID, USER_NAME FROM USER_MST WHERE USER_ID IN ({', '.join('?' for _ in ids)})", tuple(ids))}
+    finally:
+        conn.close()
+    return _CUSTOMER.sub(lambda m: names.get(m.group(1), m.group(0)), text)
 
 
 def issue_mode(issue_no: int | None) -> str:

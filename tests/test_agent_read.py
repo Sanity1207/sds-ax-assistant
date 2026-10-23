@@ -258,7 +258,7 @@ def test_prompt_message_log(db_path):
     rows = connect().execute("SELECT SPEAKER, CONTENT FROM MESSAGE_LOG ORDER BY SEQ").fetchall()
     assert [tuple(r) for r in rows] == [("관리자", "V003 이름 알려 줘"), ("비서", "V003 혼합탱크 1입니다.")]
     llm_event = connect().execute("SELECT NAME FROM CALL_LOG WHERE EVENT_KIND = 'llm'").fetchone()[0]
-    assert llm_event == "assistant@v3"
+    assert llm_event == "assistant@v4"
 
 
 # ---- T30: ③ 값 이상 조사 ----

@@ -20,8 +20,8 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage  # noqa
 
 from app import config  # noqa: E402
 from app.agent import (CARD_QUESTION, CONFIRM_QUESTION, MODE_NAMES, REQUEST_TAG, McpUnavailable,  # noqa: E402
-                       answer_approval, free_thread_id, issue_mode, issue_thread_id, load_messages, needs_retry,
-                       open_thread, pending_approval, retry_turn, run_turn)
+                       answer_approval, fill_customer_names, free_thread_id, issue_mode, issue_thread_id,
+                       load_messages, needs_retry, open_thread, pending_approval, retry_turn, run_turn)
 from app.resolution import CLOSED_TARGETS  # noqa: E402
 from app.auth import DEFAULT_USER, PermissionDenied, can, get_user, selectable_users  # noqa: E402
 from app.classify import (FAILED_RESULT, ReclassifyNotAllowed, RegistrationRejected, can_reapply,  # noqa: E402
@@ -228,7 +228,8 @@ def show_message(message) -> None:
         for call in message.tool_calls:
             st.chat_message("assistant").caption(f"도구 호출: {call['name']}({call['args']})")
         if message.content:
-            st.chat_message("assistant").write(message.content)
+            # 고객 안내 초안의 {고객:ID} 자리표시는 화면에서 Python이 이름으로 채운다(발송 없음).
+            st.chat_message("assistant").write(fill_customer_names(message.content))
 
 
 def work(call):
