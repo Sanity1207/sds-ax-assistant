@@ -310,3 +310,29 @@ def test_mode_closed_issue_has_no_first_question(db_path):
     at.button(key="investigate_1").click().run()
     assert at.caption[1].value == "닫힌 이슈 대화(조회 전용) · thread issue-1-A001"
     assert chat_texts(at, "assistant") == []
+
+
+# ---- T23: 실패 배너·[다시 시도] ----
+
+def test_failure_banner_and_retry(db_path, monkeypatch):
+    from app import fake_llm as fake
+
+    real_chat = fake.DemoChatModel.chat
+
+    def broken(self, messages, tools=None):
+        raise fake.FakeLLMError("모델 장애")
+
+    monkeypatch.setattr(fake.DemoChatModel, "chat", broken)
+    at = open_app()
+    at.sidebar.radio(key="page").set_value("조사 비서").run()
+    at.chat_input[0].set_value("혼합탱크 ID 알려 줘").run()
+    assert not at.exception
+    assert "대화가 멈췄습니다" in at.error[0].value and "모델 장애" in at.error[0].value
+    assert at.button(key="retry_turn")
+
+    monkeypatch.setattr(fake.DemoChatModel, "chat", real_chat)
+    at.button(key="retry_turn").click().run()
+    assert not at.exception
+    assert len(at.error) == 0
+    assert "V003" in " ".join(chat_texts(at, "assistant"))
+    assert chat_texts(at, "user") == ["혼합탱크 ID 알려 줘"]  # 관리자 재입력 없음

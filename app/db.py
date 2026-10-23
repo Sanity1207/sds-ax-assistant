@@ -13,7 +13,7 @@ USER_ROLES = ("조회 고객", "요청 고객", "관리자", "시스템")
 CONTACT_ROLES = ("매핑 담당자", "VESSEL 담당자", "ACTION 담당자")
 RESOLUTION_KINDS = ("note", "승인", "취소", "직접 편집", "실행 성공", "실행 실패")
 # 처리 기록의 실행 = 사람의 행동 1회에 프로그램이 반응해 멈출 때까지의 한 덩어리.
-RUN_KINDS = ("문의 등록", "다시 분류", "대화 입력", "승인 응답")
+RUN_KINDS = ("문의 등록", "다시 분류", "대화 입력", "다시 시도", "승인 응답")
 EVENT_KINDS = ("branch", "llm", "tool", "approval", "commit", "finalize")
 SPEAKERS = ("관리자", "비서")
 

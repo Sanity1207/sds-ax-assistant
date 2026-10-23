@@ -19,8 +19,8 @@ from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ct
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage  # noqa: E402
 
 from app import config  # noqa: E402
-from app.agent import (MODE_NAMES, REQUEST_TAG, free_thread_id, issue_mode, issue_thread_id, load_messages,  # noqa: E402
-                       open_thread, run_turn)
+from app.agent import (MODE_NAMES, REQUEST_TAG, McpUnavailable, free_thread_id, issue_mode,  # noqa: E402
+                       issue_thread_id, load_messages, needs_retry, open_thread, retry_turn, run_turn)
 from app.auth import DEFAULT_USER, PermissionDenied, can, get_user, selectable_users  # noqa: E402
 from app.classify import (FAILED_RESULT, ReclassifyNotAllowed, RegistrationRejected, can_reclassify,  # noqa: E402
                           classify_issue, register_issue)
@@ -198,8 +198,11 @@ def show_message(message) -> None:
             st.chat_message("assistant").write(message.content)
 
 
-def send(thread_id: str, text: str) -> None:
-    """대화 입력 1회. 비서가 일하는 동안 진행 상황(예: '도구 호출 중: get_vessel_mappings(V003) (3/8)')을 보여 준다."""
+def work(call) -> None:
+    """비서 작업 1회(대화 입력·다시 시도). 진행 상황(예: '도구 호출 중: get_vessel_mappings(V003) (3/8)')을 보여 준다.
+
+    모든 모델 실패·MCP 연결 실패는 여기서 삼키고, 화면이 thread 상태를 보고 오류 배너와 [다시 시도]를 띄운다.
+    """
     with st.status("비서가 조사하는 중…", expanded=True) as status:
         line = st.empty()
         ctx = get_script_run_ctx()
@@ -211,12 +214,31 @@ def send(thread_id: str, text: str) -> None:
             status.update(label=message)
 
         try:
-            asyncio.run(run_turn(thread_id, text, progress=progress))
-        except LLMError as e:
-            status.update(label="응답 실패", state="error")
-            st.error(f"모든 모델이 응답하지 못했습니다. 잠시 뒤 다시 시도해 주세요. ({e})")
+            asyncio.run(call(progress))
+        except (LLMError, McpUnavailable) as e:
+            st.session_state.last_failure = str(e)
+            status.update(label="응답 실패", state="error", expanded=False)
             return
         status.update(label="완료", state="complete", expanded=False)
+
+
+def send(thread_id: str, text: str) -> None:
+    work(lambda progress: run_turn(thread_id, text, progress=progress))
+
+
+def retry(thread_id: str) -> None:
+    work(lambda progress: retry_turn(thread_id, progress=progress))
+
+
+def show_failure_banner(thread_id: str) -> None:
+    """실패로 멈춘 thread: 오류 배너 + [다시 시도](멈춘 지점부터, 관리자 재입력 없이)."""
+    detail = st.session_state.get("last_failure")
+    st.error("모든 모델이 응답하지 못했거나 MCP 서버 연결이 끊겨 대화가 멈췄습니다. 대화 상태는 보존되어 있습니다. "
+             "[다시 시도]를 누르면 멈춘 지점부터 이어 갑니다." + (f"\n\n({detail})" if detail else ""))
+    if st.button("다시 시도", key="retry_turn"):
+        st.session_state.pop("last_failure", None)
+        retry(thread_id)
+        st.rerun()
 
 
 def page_assistant() -> None:
@@ -246,6 +268,8 @@ def page_assistant() -> None:
         send(thread_id, text)
     for message in asyncio.run(load_messages(thread_id)):
         show_message(message)
+    if asyncio.run(needs_retry(thread_id)):
+        show_failure_banner(thread_id)
 
 
 def main() -> None:

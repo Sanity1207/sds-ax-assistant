@@ -74,7 +74,7 @@
   - 확인: `pytest -q tests/test_agent_read.py` 전체 — 이름으로 ID 찾기·마스터 개수 질문 가짜 시나리오 정답, MESSAGE_LOG 행 생성
 - [x] **T22 멈춤 규칙** — 입력 1회당 도구 8회 상한, 같은 도구·같은 인자 중복, 같은 도구 연속 2회 실패 → finalize(도구 없이 LLM 1회, 실패 시 Python 문장, "확인하지 못한 것"과 다음 질문 제안).
   - 확인: `pytest -q tests/test_stop_and_failure.py -k stop` — 세 경우 모두 finalize 도달, 도구 호출 수 ≤ 8
-- [ ] **T23 실패 처리** — 비서 대화에서 모든 모델 실패 → 오류 배너 + [다시 시도](체크포인터 멈춘 지점부터 실패한 LLM 호출만, 도구 예산 이어서 셈). MCP 연결 끊김 → 1회 재연결, 실패 시 배너.
+- [x] **T23 실패 처리** — 비서 대화에서 모든 모델 실패 → 오류 배너 + [다시 시도](체크포인터 멈춘 지점부터 실패한 LLM 호출만, 도구 예산 이어서 셈). MCP 연결 끊김 → 1회 재연결, 실패 시 배너.
   - 확인: `pytest -q tests/test_stop_and_failure.py` 전체 — 다시 시도 후 이전 도구 결과 유지, 재연결 1회 시도 기록
 
 ## 묶음 5 · ① 처리안 승인
@@ -156,6 +156,8 @@ Claude Code로 구현하는 기준이다. 작업당 15~25분(작성 + 가짜 LLM
 - 2026-10-23 T20 완료: app/guard.py(GuardStep 인터페이스, LengthStep 2,000자, PatternStep 7유형: 정규화 문장·공백 뺀 문장·Base64 해독문 검사, '확인필요'는 미리 제외). run_turn에서 차단 시 LLM 미호출·정해진 안내·branch '입력 검사'·결과 '입력 차단'·도구 0회, 차단 교환은 LLM 입력에서 뺌. tests/test_guard.py 119건(차단 78·오탐 36 등)
 - 2026-10-23 T21 완료: 비서 시스템 프롬프트 v2(용어·업무 범위·답하는 법·무관 주제 정해진 거절 문장·신뢰하지 않는 데이터·처리안 규칙), run_turn(progress=)로 '도구 호출 중: 이름(인자) (n/8)' 진행 표시, 화면은 st.status. MESSAGE_LOG는 T10부터 기록. tests/test_agent_read.py 전체 32건
 - 2026-10-23 T22 완료: 상태에 calls_seen·fail_tool·fail_count, agent 노드가 중복·상한을, tools 노드가 상한·연속 2회 실패를 판정해 stop_reason → finalize. 실행 안 한 호출엔 '[멈춤]' 결과로 짝 맞춤. finalize는 도구 없이 LLM 1회(도구 호출·결과를 글로 풀어 보냄, finalize@v1), 실패 시 Python 문장. 첫 줄 '조사 한도 도달(사유).'/'도구 실패로 조사를 멈췄습니다(사유).'은 Python. PROCESS_LOG 결과 '멈춤'. tests/test_stop_and_failure.py -k stop 9건
+- 2026-10-23 T23 완료: retry_turn([다시 시도], 실행 종류 '다시 시도' 추가)이 graph.ainvoke(None)로 체크포인터의 멈춘 노드부터 이어 감(도구 결과·예산 유지). ToolRunner가 MCP 전송 오류 시 1회 재연결(연결 설정으로 도구를 새로 읽음), 실패하면 McpUnavailable. 실패로 멈춘 thread에 새 입력이 오면 멈춘 작업을 닫고 진행. 화면: 오류 배너 + [다시 시도]. tests/test_stop_and_failure.py 16건, test_ui -k failure
+- 2026-10-23 묶음 4(T17~T23) 완료: 결정 사항은 REPORT_묶음4.md
 
 ## 실제 Bedrock 점검 목록
 

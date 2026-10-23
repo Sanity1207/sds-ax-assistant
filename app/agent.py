@@ -117,6 +117,9 @@ FIRST_YES_REQUEST = ("이슈 #{n} 건을 조사해 주세요. 필요한 도구�
                      "처리할 수 있으면 propose_resolution으로 처리안을 만들어 주세요.")
 # 첫 질문 교환(질문·y/n 답·다시 묻기)에 붙이는 표시. 화면에는 보이고 LLM 입력에서는 뺀다.
 FIRST_TAG = "first_question"
+# 실패로 멈춘 대화에 [다시 시도] 대신 새 입력이 왔을 때 남기는 문장.
+ABANDONED_REASON = "앞 입력은 오류로 멈춰 이 호출을 실행하지 않음"
+ABANDONED_REPLY = "(앞 입력은 모델·연결 오류로 답하지 못하고 넘어갔습니다.)"
 # guard 체인에 막힌 입력과 그 안내 문장. 화면에는 보이고 LLM 입력에서는 뺀다.
 BLOCKED_TAG = "guard_blocked"
 # 첫 질문에 y로 답했을 때 Python이 만든 조사 요청. LLM에는 보내고 화면에는 감춘다(관리자가 친 말은 y).
@@ -270,12 +273,14 @@ def fallback_summary(messages: list[BaseMessage], reason: str) -> str:
 
 
 def build_graph(llm: FallbackLLM | None, tools: list, checkpointer: BaseCheckpointSaver | None = None,
-                run: Run | None = None, progress: Callable[[str], None] | None = None):
+                run: Run | None = None, progress: Callable[[str], None] | None = None, *,
+                connection: dict | None = None):
     """run을 주면 노드마다 처리 기록을 남긴다. tools는 이번 모드에 허용된 도구만 넘긴다.
 
     progress를 주면 LLM 호출·도구 호출 직전에 진행 문장을 넘긴다(화면의 진행 표시).
     """
     tools_by_name = {t.name: t for t in tools}
+    runner = ToolRunner(tools, connection, run)
     notify = progress or (lambda text: None)
 
     def agent(state: AgentState) -> dict:
@@ -332,7 +337,7 @@ def build_graph(llm: FallbackLLM | None, tools: list, checkpointer: BaseCheckpoi
                     text = f"[오류] '{call['name']}' 도구는 없습니다. 쓸 수 있는 도구: {', '.join(tools_by_name)}"
                 status = "error"
             else:
-                message = await tool.ainvoke({**call, "type": "tool_call"})
+                message = await runner.invoke(call)
                 text = _text(message.content)
                 status = message.status
                 if status == "error" and not text.startswith("[오류]"):
@@ -414,20 +419,79 @@ def build_graph(llm: FallbackLLM | None, tools: list, checkpointer: BaseCheckpoi
     return graph.compile(checkpointer=checkpointer)
 
 
-@asynccontextmanager
-async def mcp_tools(user_id: str | None = None, issue_no: int | None = None):
-    """MCP 서버(stdio)를 띄워 도구 목록을 돌려준다. 블록을 벗어나면 서버를 닫는다.
-
-    행동한 관리자와 화면의 이슈는 환경변수로 넘긴다(log_resolution의 사용자, '그 화면의 이슈만' 규칙).
-    """
+def mcp_connection(user_id: str | None = None, issue_no: int | None = None) -> dict:
+    """MCP 서버(stdio) 연결 설정. 행동한 관리자와 화면의 이슈는 환경변수로 넘긴다
+    (log_resolution의 사용자, '그 화면의 이슈만' 규칙)."""
     command, args = server_command()
     env = {"APP_DB_PATH": str(config.db_path()), "APP_ACTING_USER": user_id or "",
            "APP_SCREEN_ISSUE": "" if issue_no is None else str(issue_no)}
-    client = MultiServerMCPClient({"app": {
-        "transport": "stdio", "command": command, "args": args, "cwd": str(config.ROOT), "env": env,
-    }})
+    return {"transport": "stdio", "command": command, "args": args, "cwd": str(config.ROOT), "env": env}
+
+
+@asynccontextmanager
+async def mcp_tools(user_id: str | None = None, issue_no: int | None = None):
+    """MCP 서버를 띄워 도구 목록을 돌려준다(세션 하나를 대화 입력 동안 쓴다). 블록을 벗어나면 서버를 닫는다."""
+    client = MultiServerMCPClient({"app": mcp_connection(user_id, issue_no)})
     async with client.session("app") as session:
         yield await load_mcp_tools(session)
+
+
+class McpUnavailable(Exception):
+    """MCP 서버 연결이 끊겼고 1회 재연결도 실패했다. 화면은 배너와 [다시 시도]를 보여 준다."""
+
+
+class NothingToRetry(Exception):
+    """[다시 시도]할 멈춘 작업이 없다."""
+
+
+def _is_connection_error(error: BaseException) -> bool:
+    """도구 실행 오류(ToolException·인자 검사)가 아니라 MCP 전송·세션이 끊긴 오류인가."""
+    from langchain_core.tools import ToolException
+    from pydantic import ValidationError
+
+    return not isinstance(error, (ToolException, ValidationError, LLMError))
+
+
+def _describe_error(error: BaseException) -> str:
+    return f"{type(error).__name__}: {error}"
+
+
+class ToolRunner:
+    """MCP 도구 실행기. 연결이 끊기면(전송 오류) 1회 재연결해 같은 호출을 다시 한다.
+
+    재연결은 연결 설정으로 도구를 새로 읽는다(그 뒤의 호출은 호출마다 새 세션). 재연결도 실패하면 McpUnavailable.
+    """
+
+    def __init__(self, tools: list, connection: dict | None, run: Run | None):
+        self.tools = {t.name: t for t in tools}
+        self.connection = connection
+        self.run = run
+        self.reconnected = False
+
+    async def invoke(self, call: dict) -> ToolMessage:
+        try:
+            return await self.tools[call["name"]].ainvoke({**call, "type": "tool_call"})
+        except Exception as first:  # noqa: BLE001 - 전송 오류만 재연결 대상
+            inner = _find(first, Exception) or first
+            if not _is_connection_error(inner):
+                raise
+            if self.reconnected or self.connection is None:
+                raise McpUnavailable(f"MCP 서버 연결이 끊겼습니다: {_describe_error(inner)}") from None
+            self.reconnected = True
+            try:
+                fresh = await load_mcp_tools(None, connection=self.connection)
+                self.tools = {t.name: t for t in fresh} | {n: t for n, t in self.tools.items() if n not in
+                                                          {f.name for f in fresh}}
+                message = await self.tools[call["name"]].ainvoke({**call, "type": "tool_call"})
+            except Exception as second:  # noqa: BLE001
+                if self.run:
+                    self.run.event("branch", "MCP 재연결", {"error": _describe_error(inner)}, "재연결 실패",
+                                   success=False, error=_describe_error(_find(second, Exception) or second))
+                raise McpUnavailable(f"MCP 서버에 다시 연결하지 못했습니다: "
+                                     f"{_describe_error(_find(second, Exception) or second)}") from None
+            if self.run:
+                self.run.event("branch", "MCP 재연결", {"error": _describe_error(inner)}, "재연결 성공")
+            return message
 
 
 @asynccontextmanager
@@ -489,6 +553,8 @@ async def run_turn(thread_id: str, text: str, llm: FallbackLLM | None = None, *,
     """대화 입력 1회를 처리한다. 같은 thread_id면 이전 대화를 이어 간다.
 
     처리 기록의 사용자·이슈는 thread ID(issue-<번호>-<관리자>, free-<관리자>-<시각>)에서 읽고, 주면 그 값을 쓴다.
+    모든 모델 실패는 LLMError, MCP 재연결 실패는 McpUnavailable로 알린다. 그때 대화 상태는 체크포인터에 남아
+    retry_turn([다시 시도])으로 멈춘 지점부터 이어 갈 수 있다.
     """
     user_id, issue_no = _resolve(thread_id, user_id, issue_no)
     require(user_id, "investigate")  # 조사 비서는 관리자만(화면 제한과 별개로 다시 확인)
@@ -499,35 +565,101 @@ async def run_turn(thread_id: str, text: str, llm: FallbackLLM | None = None, *,
             first = await _first_question(saver, thread_id, text, issue_no, mode, run)
             if first is None and (verdict := run_guard(text)):
                 return await _blocked(saver, thread_id, text, verdict, mode, run)
+            if not isinstance(first, TurnResult):
+                await _abandon_failed(saver, thread_id, run)
         if isinstance(first, TurnResult):
             return first
         human = first or HumanMessage(text)
-        llm = llm or get_llm()
-        try:
-            async with mcp_tools(user_id, issue_no) as all_tools, open_checkpointer() as saver:
-                tools = tools_for_mode(all_tools, mode)
-                graph = build_graph(llm, tools, saver, run, progress)
-                state = await graph.ainvoke(
-                    {"messages": [human], "tool_calls_used": 0, "stop_reason": "", "calls_seen": [], "fail_tool": None,
-                     "fail_count": 0, "issue_no": issue_no, "mode": mode},
-                    _config(thread_id),
-                )
-        except BaseException as e:
-            # MCP stdio 클라이언트가 anyio TaskGroup 안에서 돌아 예외가 ExceptionGroup으로 감싸여 나온다.
-            # 호출한 쪽이 except LLMError로 받을 수 있게 LLMError를 꺼내 다시 던진다.
-            llm_error = _find(e, LLMError)
-            if llm_error is None:
-                raise
+        start = {"messages": [human], "tool_calls_used": 0, "stop_reason": "", "calls_seen": [], "fail_tool": None,
+                 "fail_count": 0, "issue_no": issue_no, "mode": mode}
+        return await _run_graph(thread_id, start, llm or get_llm(), user_id, issue_no, mode, run, progress)
+
+
+async def retry_turn(thread_id: str, llm: FallbackLLM | None = None, *, user_id: str | None = None,
+                     issue_no: int | None = None, progress: Callable[[str], None] | None = None) -> TurnResult:
+    """[다시 시도]: 모든 모델 실패·MCP 연결 실패로 멈춘 대화를 체크포인터의 멈춘 지점부터 이어 간다.
+
+    관리자가 다시 입력하지 않는다. 이미 부른 도구 결과는 그대로 두고 실패한 LLM 호출(또는 도구 호출)만 다시 하며,
+    도구 예산도 이어서 센다. 처리 기록에는 새 실행('다시 시도')으로 남는다.
+    """
+    user_id, issue_no = _resolve(thread_id, user_id, issue_no)
+    require(user_id, "investigate")
+    async with open_checkpointer() as saver:
+        snapshot = await build_graph(None, [], saver).aget_state(_config(thread_id))
+    if pending_kind(snapshot) != "retry":
+        raise NothingToRetry(f"thread '{thread_id}'에는 다시 시도할 멈춘 작업이 없습니다.")
+    mode = snapshot.values.get("mode") or issue_mode(issue_no)
+    with start_run("다시 시도", user_id, issue_no, thread_id) as run:
+        run.event("branch", "다시 시도", {"next": list(snapshot.next),
+                                         "tool_calls_used": snapshot.values.get("tool_calls_used", 0)}, "멈춘 지점부터")
+        return await _run_graph(thread_id, None, llm or get_llm(), user_id, issue_no, mode, run, progress)
+
+
+async def _run_graph(thread_id: str, graph_input: dict | None, llm: FallbackLLM, user_id: str, issue_no: int | None,
+                     mode: str, run: Run, progress) -> TurnResult:
+    """그래프를 돌린다(graph_input이 None이면 체크포인터의 멈춘 지점부터). 실패는 LLMError·McpUnavailable로 꺼내 던진다."""
+    try:
+        async with mcp_tools(user_id, issue_no) as all_tools, open_checkpointer() as saver:
+            tools = tools_for_mode(all_tools, mode)
+            graph = build_graph(llm, tools, saver, run, progress, connection=mcp_connection(user_id, issue_no))
+            state = await graph.ainvoke(graph_input, _config(thread_id))
+    except BaseException as e:
+        # MCP stdio 클라이언트가 anyio TaskGroup 안에서 돌아 예외가 ExceptionGroup으로 감싸여 나온다.
+        # 호출한 쪽이 except LLMError·McpUnavailable로 받을 수 있게 꺼내 다시 던진다.
+        llm_error = _find(e, LLMError)
+        if llm_error is not None:
             run.finish("모든 모델 실패", model_id=getattr(llm_error, "model_id", None))
             raise llm_error from None
-        last = state["messages"][-1]
-        answer = _text(last.content)
-        run.message("비서", answer)
-        run.finish("멈춤" if state.get("stop_reason") else "답변 완료", model_id=state.get("model_id"),
-                   tool_calls=state.get("tool_calls_used", 0),
-                   stop_reason=state.get("stop_reason") or None)
+        mcp_error = _find(e, McpUnavailable)
+        if mcp_error is not None:
+            run.finish("MCP 연결 실패")
+            raise mcp_error from None
+        if not isinstance(e, Exception) and not isinstance(e, BaseExceptionGroup):
+            raise
+        if (inner := _find(e, Exception)) is not None and _is_connection_error(inner):
+            # MCP 서버를 처음 띄우는 단계에서 실패
+            run.finish("MCP 연결 실패")
+            raise McpUnavailable(f"MCP 서버에 연결하지 못했습니다: {_describe_error(inner)}") from None
+        raise
+    last = state["messages"][-1]
+    answer = _text(last.content)
+    run.message("비서", answer)
+    run.finish("멈춤" if state.get("stop_reason") else "답변 완료", model_id=state.get("model_id"),
+               tool_calls=state.get("tool_calls_used", 0), stop_reason=state.get("stop_reason") or None)
     return TurnResult(answer, state.get("model_id"), state["messages"], state.get("tool_calls_used", 0),
                       mode=mode, tools=[t.name for t in tools])
+
+
+def pending_kind(snapshot) -> str | None:
+    """thread가 멈춰 있는 이유: approval(승인 카드 대기) / retry(실패로 멈춤) / None(대기 없음)."""
+    if any(getattr(task, "interrupts", None) for task in snapshot.tasks or ()):
+        return "approval"
+    if snapshot.next:
+        return "retry"
+    return None
+
+
+async def needs_retry(thread_id: str) -> bool:
+    """화면용: 이 thread가 실패로 멈춰 [다시 시도]를 기다리는가."""
+    async with open_checkpointer() as saver:
+        snapshot = await build_graph(None, [], saver).aget_state(_config(thread_id))
+    return pending_kind(snapshot) == "retry"
+
+
+async def _abandon_failed(saver, thread_id: str, run: Run) -> None:
+    """실패로 멈춘 대화에 [다시 시도] 대신 새 입력이 오면, 멈춘 작업을 닫고 새 입력을 받는다.
+
+    답하지 못한 도구 호출에는 결과 짝을, 대화에는 짧은 안내를 남겨 이후 LLM 입력의 순서가 깨지지 않게 한다.
+    """
+    graph = build_graph(None, [], saver)
+    snapshot = await graph.aget_state(_config(thread_id))
+    if pending_kind(snapshot) != "retry":
+        return
+    messages = snapshot.values.get("messages", [])
+    closing = unanswered_tool_messages(messages, ABANDONED_REASON)
+    closing.append(AIMessage(ABANDONED_REPLY))
+    await graph.aupdate_state(_config(thread_id), {"messages": closing, "stop_reason": ""}, as_node="finalize")
+    run.event("branch", "멈춘 작업 닫기", {"next": list(snapshot.next)}, "새 입력으로 진행")
 
 
 async def _first_question(saver, thread_id: str, text: str, issue_no: int | None, mode: str,

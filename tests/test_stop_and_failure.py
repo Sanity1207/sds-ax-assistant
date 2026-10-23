@@ -142,3 +142,135 @@ def test_stop_finalize_input_has_no_tool_blocks(db_path):
     assert not getattr(human, "tool_calls", None)
     payload = connect().execute("SELECT INPUT FROM CALL_LOG WHERE NAME = 'finalize@v1'").fetchone()[0]
     assert "tools" not in json.loads(payload)
+
+
+# ---- T23: 실패 처리(모든 모델 실패 → [다시 시도], MCP 끊김 → 1회 재연결) ----
+
+import anyio  # noqa: E402
+import pytest  # noqa: E402
+
+from app import agent as agent_module  # noqa: E402
+from app.agent import (ABANDONED_REPLY, McpUnavailable, NothingToRetry, load_messages, needs_retry,  # noqa: E402
+                       retry_turn)
+from app.llm import AllModelsFailed  # noqa: E402
+
+
+def down():
+    """모든 모델이 실패하는 LLM."""
+    return fake_llm(FakeChatModel("f1", error=FakeLLMError("x")), FakeChatModel("f2", error=FakeLLMError("y")))
+
+
+def test_failure_all_models_then_retry_keeps_tool_results(db_path):
+    first = FakeChatModel("f1", [tool_call("find_vessel", {"query": "혼합"}, "c1"), FakeLLMError("장애")])
+    with pytest.raises(AllModelsFailed):
+        asyncio.run(run_turn(FREE, "혼합탱크 ID?", fake_llm(first)))
+    assert asyncio.run(needs_retry(FREE))
+    assert run_row()["RESULT"] == "모든 모델 실패"
+
+    def answer(messages, tools):
+        # 다시 시도: 관리자 재입력 없이, 이미 부른 도구 결과를 보고 실패한 LLM 호출만 다시 한다.
+        assert isinstance(messages[-1], ToolMessage) and "V003 혼합탱크 1" in messages[-1].content
+        assert [m.content for m in messages if isinstance(m, HumanMessage)] == ["혼합탱크 ID?"]
+        return AIMessage("V003 혼합탱크 1입니다.")
+
+    second = FakeChatModel("f1", [answer])
+    result = asyncio.run(retry_turn(FREE, fake_llm(second)))
+    assert result.answer == "V003 혼합탱크 1입니다." and result.tool_calls_used == 1
+    assert len(second.calls) == 1  # 실패한 LLM 호출만
+    assert not asyncio.run(needs_retry(FREE))
+    run = run_row()
+    assert (run["RUN_KIND"], run["RESULT"], run["THREAD_ID"], run["USER_ID"]) == ("다시 시도", "답변 완료", FREE, "A001")
+    assert [m.content for m in asyncio.run(load_messages(FREE)) if isinstance(m, HumanMessage)] == ["혼합탱크 ID?"]
+
+
+def test_failure_retry_continues_budget(db_path):
+    script = [tool_call("find_action", {"query": str(101 + i)}, f"c{i}") for i in range(6)] + [FakeLLMError("장애")]
+    with pytest.raises(AllModelsFailed):
+        asyncio.run(run_turn(FREE, "ACTION 하나씩", fake_llm(FakeChatModel("f", script))))
+    calls = AIMessage("", tool_calls=[{"name": "find_vessel", "args": {"query": f"V00{i}"}, "id": f"v{i}"}
+                                      for i in range(1, 4)])
+    retry = FakeChatModel("f", [calls, lambda m, t: AIMessage("요약")])
+    result = asyncio.run(retry_turn(FREE, fake_llm(retry)))
+    assert result.tool_calls_used == 8  # 6 + 2, 세 번째는 상한
+    assert result.answer.startswith("조사 한도 도달(도구 호출 상한(8회) 도달).")
+
+
+def test_failure_first_call_fails_then_retry(db_path):
+    with pytest.raises(AllModelsFailed):
+        asyncio.run(run_turn(FREE, "VESSEL 몇 개?", down()))
+    result = asyncio.run(retry_turn(FREE, fake_llm(FakeChatModel("f", [AIMessage("5개입니다.")]))))
+    assert result.answer == "5개입니다."
+
+
+def test_failure_new_input_instead_of_retry(db_path):
+    with pytest.raises(AllModelsFailed):
+        asyncio.run(run_turn(FREE, "첫 질문", fake_llm(FakeChatModel("f", [tool_call("find_vessel", {"query": "V001"}, "c1"),
+                                                                           FakeLLMError("장애")]))))
+    model = FakeChatModel("f", [AIMessage("둘째 답")])
+    result = asyncio.run(run_turn(FREE, "다른 질문", fake_llm(model)))
+    assert result.answer == "둘째 답" and not asyncio.run(needs_retry(FREE))
+    sent = model.calls[0][1]
+    kinds = [type(m).__name__ for m in sent]
+    assert kinds == ["SystemMessage", "HumanMessage", "AIMessage", "ToolMessage", "AIMessage", "HumanMessage"]
+    assert sent[4].content == ABANDONED_REPLY
+
+
+def test_failure_nothing_to_retry(db_path):
+    with pytest.raises(NothingToRetry):
+        asyncio.run(retry_turn(FREE, fake_llm(FakeChatModel("f", []))))
+    asyncio.run(run_turn(FREE, "질문", fake_llm(FakeChatModel("f", [AIMessage("답")]))))
+    with pytest.raises(NothingToRetry):
+        asyncio.run(retry_turn(FREE, fake_llm(FakeChatModel("f", []))))
+
+
+def break_session_tools(monkeypatch, reconnect_ok=True):
+    """세션으로 읽은 도구의 첫 호출이 '연결 끊김'으로 실패하게 만든다. reconnect_ok=False면 재연결도 실패."""
+    real = agent_module.load_mcp_tools
+    state = {"reconnects": 0, "real": real}
+
+    async def flaky(session, **kwargs):
+        if session is None:  # 재연결
+            state["reconnects"] += 1
+            if not reconnect_ok:
+                raise anyio.BrokenResourceError("서버 프로세스 없음")
+            return await real(None, **kwargs)
+        tools = await real(session, **kwargs)
+        for t in tools:
+            async def broken(*args, **kw):
+                raise anyio.ClosedResourceError()
+            object.__setattr__(t, "ainvoke", broken)
+        return tools
+
+    monkeypatch.setattr(agent_module, "load_mcp_tools", flaky)
+    return state
+
+
+def test_failure_mcp_disconnect_reconnects_once(db_path, monkeypatch):
+    state = break_session_tools(monkeypatch)
+    model = FakeChatModel("f", [tool_call("find_vessel", {"query": "혼합"}, "c1"),
+                                tool_call("find_action", {"query": "냉각"}, "c2"), AIMessage("V003, 104입니다.")])
+    result = asyncio.run(run_turn(FREE, "혼합탱크와 냉각", fake_llm(model)))
+    assert result.answer == "V003, 104입니다."
+    results = tool_messages(result)
+    assert "V003 혼합탱크 1" in results[0].content and "104 냉각" in results[1].content
+    assert state["reconnects"] == 1  # 재연결은 한 번뿐, 그 뒤 호출은 새 연결로
+    events = connect().execute("SELECT NAME, OUTPUT FROM CALL_LOG WHERE NAME = 'MCP 재연결'").fetchall()
+    assert [tuple(e) for e in events] == [("MCP 재연결", "재연결 성공")]
+
+
+def test_failure_mcp_reconnect_fails_then_retry(db_path, monkeypatch):
+    state = break_session_tools(monkeypatch, reconnect_ok=False)
+    model = FakeChatModel("f", [tool_call("find_vessel", {"query": "혼합"}, "c1")])
+    with pytest.raises(McpUnavailable, match="다시 연결하지 못했습니다"):
+        asyncio.run(run_turn(FREE, "혼합탱크 ID?", fake_llm(model)))
+    assert state["reconnects"] == 1
+    run = run_row()
+    assert run["RESULT"] == "MCP 연결 실패"
+    event = connect().execute("SELECT OUTPUT, SUCCESS FROM CALL_LOG WHERE NAME = 'MCP 재연결'").fetchone()
+    assert tuple(event) == ("재연결 실패", "N")
+    assert asyncio.run(needs_retry(FREE))
+
+    monkeypatch.setattr(agent_module, "load_mcp_tools", state["real"])  # 서버가 돌아왔다
+    result = asyncio.run(retry_turn(FREE, fake_llm(FakeChatModel("f", [AIMessage("V003입니다.")]))))
+    assert result.answer == "V003입니다." and result.tool_calls_used == 1
+    assert "V003 혼합탱크 1" in tool_messages(result)[0].content
