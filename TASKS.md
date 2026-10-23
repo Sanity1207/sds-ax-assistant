@@ -110,7 +110,7 @@
   - 확인: 로드 스크립트로 15건·분포 4/3/4/2/2·필수 필드 누락 0 확인
 - [x] **T34 평가 실행기** — 분류 함수·비서 그래프 직접 호출, 케이스마다 DB 시드 초기화, fake/bedrock 모드, 안전 지표 6종 DB 판정, JSON Lines(case_id·pass·위반·모드·응답 모델·RUN_ID).
   - 확인: `pytest -q tests/test_eval_runner.py -k run` — fake 모드 15건 실행, 안전 지표 위반 0
-- [ ] **T35 회귀 비교·단일 재실행** — 이전 결과와 케이스 단위 비교(이전 pass → 이번 fail = 회귀, 첫 실행은 기준선), 특정 케이스만 다시 돌리기.
+- [x] **T35 회귀 비교·단일 재실행** — 이전 결과와 케이스 단위 비교(이전 pass → 이번 fail = 회귀, 첫 실행은 기준선), 특정 케이스만 다시 돌리기.
   - 확인: `pytest -q tests/test_eval_runner.py` 전체 — 조작한 이전 결과로 회귀 1건 검출
 - [ ] **T36 실제 Bedrock 최종 평가(사용자 지시 시에만)** — 아래 점검 목록과 함께 1회 실행, 불합격 케이스는 그 케이스만 재실행해 우연 여부 확인.
   - 확인: 자동 분류 4/4, 비서 시나리오 11건 정답 85% 이상, 안전 지표 6종 100%, 회귀 0건
@@ -171,6 +171,7 @@ Claude Code로 구현하는 기준이다. 작업당 15~25분(작성 + 가짜 LLM
 - 2026-10-23 묶음 7(T31~T32) 완료: 결정 사항은 REPORT_묶음7.md
 - 2026-10-23 T33 완료: eval/cases.jsonl 15건(자동 분류 4: 매핑 생성·VESSEL 이관·ID 불일치 반려·지시문 섞인 문의 / ② 3: 이름→ID·ACTION 개수·날씨 거절 / ① 4: #2 생성 y·#3 수정 편집 후 y·#4 삭제 이중 확인·#7 이관 완료 / ③ 2: #5 매핑 오류·이름 불만 이관 성격 / ④ 2: #8 ID 후보·#9 안내 초안). app/evaluate.py load_cases·validate_case, `python -m app.evaluate --check`. tests/test_eval_runner.py 3건
 - 2026-10-23 T34 완료: app/evaluate.py run_case·run_eval(분류 함수·비서 그래프 직접 호출, 케이스마다 eval/work/ 평가 전용 DB를 시드로 초기화, fake/bedrock), 응답마다 업무 데이터 스냅숏 차이로 안전 지표 6종 판정, judge(분류 = 처리상태·담당자, 비서 = 필수 사실·필수 도구·처리안 내용·끝난 상태), 결과 JSON Lines(eval/results/<시각>_<모드>.jsonl: case_id·pass·violations·mode·models·run_ids). 가짜 모드 15건 전부 통과·위반 0. tests/test_eval_runner.py -k 'run or safety' 11건
+- 2026-10-23 T35 완료: compare(이번에 돌린 케이스만, 이전 pass → 이번 fail = 회귀, 이전 결과 없으면 기준선), latest_results(같은 모드의 최근 결과)·--baseline, --case로 그 케이스만 다시 실행, 종료 코드 0 합격·2 불합격·1 입력 오류. tests/test_eval_runner.py 전체 18건
 
 ## 실제 Bedrock 점검 목록
 

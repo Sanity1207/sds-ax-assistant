@@ -125,3 +125,58 @@ def test_safety_ledger_mismatch_and_unapproved_log(db_path):
     log = {"LOG_ID": 10, "KIND": "실행 성공", "ISSUE_NO": 4, "PROPOSAL_JSON": _json.dumps(proposal)}
     # 매핑이 그대로이고 이슈도 처리대기인데 '실행 성공'이 남은 경우, 그리고 그 앞에 '승인'이 없는 경우
     assert set(check_safety(APPROVAL_CASE, outcome([]), [log], [])) == {"ledger_mismatch", "unapproved_write"}
+
+
+# ---- T35: 회귀 비교·단일 재실행 ----
+
+from app.evaluate import compare, latest_results  # noqa: E402
+
+
+def test_compare_rules():
+    prev = [{"case_id": "A", "pass": True}, {"case_id": "B", "pass": False}, {"case_id": "C", "pass": True}]
+    cur = [{"case_id": "A", "pass": False}, {"case_id": "B", "pass": False}, {"case_id": "C", "pass": True},
+           {"case_id": "D", "pass": False}]
+    assert compare(prev, cur) == ["A"]  # 이전 pass → 이번 fail만 회귀(B는 원래 fail, D는 새 케이스)
+    assert compare(None, cur) == [] and compare([], cur) == []  # 첫 실행은 기준선
+
+
+def write_cases(path, cases):
+    path.write_text("".join(json.dumps(c, ensure_ascii=False) + "\n" for c in cases), encoding="utf-8")
+
+
+def test_regression_detected_with_manipulated_previous(eval_dirs, tmp_path, capsys):
+    work, out = eval_dirs
+    cases = load_cases()
+    # 이전 결과(조작): 15건 모두 pass
+    out.mkdir(parents=True)
+    previous = out / "20260101-000000_fake.jsonl"
+    previous.write_text("".join(json.dumps({"case_id": c["case_id"], "pass": True}) + "\n" for c in cases),
+                        encoding="utf-8")
+    # 이번: F1의 가짜 응답을 틀린 답으로 바꾼 평가셋을 F1만 다시 돌린다
+    broken = [dict(c, fake=[{"tool": "find_vessel", "args": {"query": "혼합탱크"}}, {"text": "모르겠습니다."}])
+              if c["case_id"] == "F1" else c for c in cases]
+    path = tmp_path / "cases.jsonl"
+    write_cases(path, broken)
+    code = main(["--mode", "fake", "--cases", str(path), "--case", "F1", "--out", str(out)])
+    printed = capsys.readouterr().out
+    assert code == 2 and "회귀 1건(F1)" in printed and "불합격" in printed
+    assert f"기준(이전 결과): {previous}" in printed
+    latest = latest_results(out, "fake")
+    assert latest != previous and [r["case_id"] for r in read_results(latest)] == ["F1"]  # 그 케이스만 돌렸다
+
+
+def test_single_case_rerun_and_first_run_baseline(eval_dirs, capsys):
+    work, out = eval_dirs
+    assert main(["--mode", "fake", "--case", "C3", "--case", "R1", "--out", str(out)]) == 0
+    printed = capsys.readouterr().out
+    assert "없음(이번 실행이 기준선)" in printed and "회귀 0건" in printed
+    assert [r["case_id"] for r in read_results(latest_results(out, "fake"))] == ["C3", "R1"]
+    # 같은 케이스를 다시 돌리면 방금 결과가 기준이 되고, 둘 다 통과라 회귀 없음
+    assert main(["--mode", "fake", "--case", "C3", "--out", str(out)]) == 0
+    assert "회귀 0건" in capsys.readouterr().out
+
+
+def test_unknown_case_id(eval_dirs, capsys):
+    work, out = eval_dirs
+    assert main(["--mode", "fake", "--case", "ZZ", "--out", str(out)]) == 1
+    assert "없는 case_id: ZZ" in capsys.readouterr().err
