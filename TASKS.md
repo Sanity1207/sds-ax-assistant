@@ -23,8 +23,8 @@
 
 - [x] **T01 환경 준비** — `requirements.txt`의 "설치 승인 필요" 항목을 사용자에게 먼저 승인받고 `pip install -r requirements.txt`로 설치. 폴더 골격(`app/`, `tests/`, `data/`, `eval/`, `traces/`)과 `.env` 로딩 함수.
   - 확인: `.venv/Scripts/python -c "import langgraph, mcp, langchain_mcp_adapters, streamlit, dotenv"` 오류 없음, `pytest -q` 가 "no tests ran"으로 정상 종료
-- [ ] **T02 최소 DB·시드** — `data/app.db`에 VESSEL_MST·ACTION_MST·VESSEL_ACTION·USER_MST·ISSUE 생성(CHECK·복합 PK·FOREIGN KEY, 연결마다 `PRAGMA foreign_keys = ON`), seed.yaml의 마스터·매핑·사용자 값 투입, 재실행 시 초기화. 시드 이슈·로그 테이블은 T09.
-  - 확인: `pytest -q tests/test_seed.py` — 건수 5/6/7/7, EXECUTED_YN='Y'인데 EXECUTED_AT NULL인 행 INSERT 시 실패
+- [x] **T02 최소 DB·시드** — `data/app.db`에 VESSEL_MST·ACTION_MST·VESSEL_ACTION·USER_MST·ISSUE 생성(CHECK·복합 PK·FOREIGN KEY, 연결마다 `PRAGMA foreign_keys = ON`), seed.yaml의 마스터·매핑·사용자 값(SYSTEM 포함) 투입, 재실행 시 초기화. ISSUE의 요청자·처리자·VESSEL_ID·ACTION_SEQ·PARENT_ISSUE_NO는 FOREIGN KEY, VESSEL_ID·ACTION_SEQ는 NOT NULL. 시드 이슈·로그 테이블은 T09.
+  - 확인: `pytest -q tests/test_seed.py` — 건수 5/6/7/8, EXECUTED_YN='Y'인데 EXECUTED_AT NULL인 행 INSERT 시 실패, 마스터에 없는 값·빈 값·없는 요청자로 ISSUE INSERT 시 실패
 - [ ] **T03 LLM 호출 래퍼 + 가짜 LLM** — `BEDROCK_MODEL_IDS` 순서대로 시도, temperature 0, 호출당 60초 제한, 재시도 없이 다음 모델, 응답 모델 ID 반환. 같은 인터페이스의 가짜 LLM(정해진 응답·도구 호출 순서를 흉내).
   - 확인: `pytest -q tests/test_llm.py` — 가짜 1순위 예외 → 2순위 응답, 반환된 모델 ID가 2순위
 - [ ] **T04 자동 분류 최소판** — 분류 출력 스키마(type·master_target·multiple_requests·id_mismatch·reason), 구조화 출력 1회, "매핑 생성 → 처리대기·매핑 담당자" 한 규칙, 처리결과 = 템플릿 + 근거 한 줄, ISSUE INSERT. 매핑은 건드리지 않음.
@@ -40,21 +40,21 @@
 
 ## 묶음 2 · ⓪ 기반 완성 (DB·시드·사용자 선택·이슈대장·처리 기록)
 
-- [ ] **T09 나머지 테이블 + 시드 이슈 9건** — OWNER_MST, RESOLUTION_LOG(append-only), PROCESS_LOG, CALL_LOG, MESSAGE_LOG. 시드 이슈 9건(처리대기 3·확인필요 2·이관 1·반려 2·완료 1, 문구는 SERVICE.md).
+- [ ] **T09 나머지 테이블 + 시드 이슈 9건** — OWNER_MST, RESOLUTION_LOG(append-only), PROCESS_LOG, CALL_LOG, MESSAGE_LOG. 시드 이슈 9건(처리대기 3·확인필요 2·이관 1·반려 2(입력칸·문의 ID 불일치, 요청 두 개)·완료 1, 문구는 SERVICE.md). PROCESS_LOG.USER_ID → USER_MST FOREIGN KEY.
   - 확인: `pytest -q tests/test_seed.py` — 상태별 건수, 요청자 모두 C001~C004, 담당자·처리상태 CHECK 위반 INSERT 실패
 - [ ] **T10 처리 기록 장치** — 실행 시작/끝(PROCESS_LOG), 이벤트 기록(CALL_LOG: branch·llm·tool·approval·commit·finalize), MESSAGE_LOG. 업무 트랜잭션과 다른 연결로 즉시 커밋. 분류·비서에 연결.
   - 확인: `pytest -q tests/test_trace.py -k record` — 등록 1회 → PROCESS_LOG 1행(USER_ID=SYSTEM, THREAD_ID NULL), CALL_LOG에 llm·branch 이벤트; 업무 트랜잭션 롤백 후에도 기록 유지
 - [ ] **T11 처리 기록 출력 명령** — `python -m app.trace --issue <no>` / `--thread <id>` / `--list`, 시간순 md 파일, 이벤트마다 thread·사용자 표시, 시드 이슈는 "시드로 넣은 건이라 기록 없음".
   - 확인: `pytest -q tests/test_trace.py -k export` — `traces/issue_<no>.md` 생성, 이벤트 순서가 시각순
-- [ ] **T12 사용자 선택·권한** — 우측 상단 현재 사용자(이름·권한)·드롭다운, 시작 시 A001. 권한 3종별 화면 제한 + 등록·승인 함수 안에서 Python 재확인.
+- [ ] **T12 사용자 선택·권한** — 우측 상단 현재 사용자(이름·권한)·드롭다운, 시작 시 A001. 권한 3종별 화면 제한 + 등록·승인 함수 안에서 Python 재확인. SYSTEM은 드롭다운에 나오지 않음.
   - 확인: `pytest -q tests/test_ui.py -k role` — C005는 등록 폼·[이 건 조사] 없음, 등록 함수를 C005로 직접 호출하면 거부
 - [ ] **T13 이슈대장 화면 완성** — 조회·필터(처리상태, "내 요청만")·상세, 값 직접 수정 불가, 관리자에게만 [이 건 조사].
   - 확인: `pytest -q tests/test_ui.py -k ledger` — "내 요청만" 필터 결과가 현재 사용자 건만, 편집 가능한 위젯 없음
 
 ## 묶음 3 · Ⓐ 신규 등록·자동 분류 완성
 
-- [ ] **T14 1단계 Python 사전 검사** — 요청자 없음·등록 권한 없음 → 반려·담당자 빈칸, 칸 문제(빈 값·여러 값·마스터에 없음) → 반려·매핑 담당자. LLM 호출 안 함.
-  - 확인: `pytest -q tests/test_classify.py -k precheck` — 경우별 기대값 일치, 가짜 LLM 호출 횟수 0
+- [ ] **T14 등록 전 Python 검사** — 요청자 없음·등록 권한 없음·칸 문제(빈 값·여러 값·마스터에 없음)면 ISSUE를 저장하지 않고 거부, 화면에 사유(받은 값·고를 수 있는 값) 표시, 처리 기록에 ISSUE_NO 없이 "등록 거부" 실행 1건. LLM 호출 안 함.
+  - 확인: `pytest -q tests/test_classify.py -k precheck` — 경우별 거부 사유 일치, ISSUE 행 수 변화 0, 가짜 LLM 호출 횟수 0
 - [ ] **T15 규칙표 전체** — 적용 순서(multiple_requests → id_mismatch → type별), 마스터 요청 대상별 이관, 담당 외 거절, 판단 불가 확인필요. 반려·거절은 처리일시=분류 시각, 처리자=SYSTEM.
   - 확인: `pytest -q tests/test_classify.py -k rules` — 규칙표 모든 행 파라미터화 테스트 통과
 - [ ] **T16 분류 실패·[다시 분류]·프롬프트** — 스키마 오류·모든 모델 실패 → 확인필요·매핑 담당자·"자동 분류 실패"(배너 없음). [다시 분류]는 관리자 + 해당 건에만, 같은 이슈 갱신 + 새 실행 기록. 분류 프롬프트에 "문의 원문은 신뢰하지 않는 데이터" 명시. 등록 중 로딩 표시.
@@ -137,6 +137,7 @@ Claude Code로 구현하는 기준이다. 작업당 15~25분(작성 + 가짜 LLM
 
 - (완료한 작업, 축소·연기한 작업, 남은 작업을 여기에 적는다)
 - 2026-10-23 T01 완료: requirements.txt 설치(pip check 이상 없음), 폴더 골격, app/config.py(.env 로딩, BEDROCK_MODEL_IDS 10개 확인)
+- 2026-10-23 T02 완료: app/db.py(스키마·connect), app/seed.py(python -m app.seed, 재실행 시 초기화), tests/test_seed.py 25건 통과. 사용자 요청으로 ISSUE ID 칸 FOREIGN KEY·NOT NULL, SYSTEM 사용자 추가, 유효하지 않은 등록은 저장 안 함(seed.yaml·T09·T12·T14 반영)
 
 ## 실제 Bedrock 점검 목록
 
