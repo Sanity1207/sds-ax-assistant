@@ -872,23 +872,29 @@ async def answer_approval(thread_id: str, text: str | None = None, *, edited: di
         async with open_checkpointer() as saver:
             graph = build_graph(llm or get_llm(), [], saver, run)
             state = await graph.ainvoke(Command(resume=answer), _config(thread_id))
-        return _turn_result(state, run, mode, [])
+        return _turn_result(state, run, mode, [], approval_run=True)
 
 
-def _turn_result(state: dict, run: Run, mode: str, tools: list) -> TurnResult:
-    """그래프 실행 결과를 정리하고 실행 결과를 기록한다. 승인 대기로 멈췄으면 카드·질문을 답으로 돌려준다."""
+def _turn_result(state: dict, run: Run, mode: str, tools: list, *, approval_run: bool = False) -> TurnResult:
+    """그래프 실행 결과를 정리하고 실행 결과를 기록한다. 승인 대기로 멈췄으면 카드·질문을 답으로 돌려준다.
+
+    대화 상태의 tool_calls_used·model_id는 대화 입력 1회(다시 시도 포함) 동안 이어지는 값이다. 승인 응답 실행은
+    도구를 부르지 않으므로 도구 수 0, 응답 모델은 그 실행에서 실제로 LLM을 불렀을 때(실행 실패 설명)만 남긴다.
+    """
     pending = state.get("pending") if state.get("__interrupt__") else None
+    tool_calls = 0 if approval_run else state.get("tool_calls_used", 0)
+    model_id = run.llm_model if approval_run else state.get("model_id")
     if pending is not None:
         answer = prompt_for(pending)
         if pending["stage"] == "card" and run:
             run.event("approval", "승인 카드", pending["proposal"], pending["card"])
         run.message("비서", answer)
-        run.finish("승인 대기", model_id=state.get("model_id"), tool_calls=state.get("tool_calls_used", 0))
+        run.finish("승인 대기", model_id=model_id, tool_calls=tool_calls)
     else:
         answer = _text(state["messages"][-1].content)
         run.message("비서", answer)
-        run.finish("멈춤" if state.get("stop_reason") else "답변 완료", model_id=state.get("model_id"),
-                   tool_calls=state.get("tool_calls_used", 0), stop_reason=state.get("stop_reason") or None)
+        run.finish("멈춤" if state.get("stop_reason") else "답변 완료", model_id=model_id,
+                   tool_calls=tool_calls, stop_reason=state.get("stop_reason") or None)
     return TurnResult(answer, state.get("model_id"), state["messages"], state.get("tool_calls_used", 0),
                       mode=mode, tools=[t.name for t in tools], pending=pending)
 

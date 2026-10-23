@@ -72,6 +72,7 @@ class Run:
         self.thread_id = thread_id
         self.path = path or db_path()
         self.result: str | None = None
+        self.llm_model: str | None = None  # 이 실행에서 마지막으로 응답한 모델(LLM을 안 불렀으면 None)
         self._seq = 0
         self._lock = threading.Lock()
         self._write(
@@ -121,6 +122,7 @@ class Run:
             out = {"raw": result.raw, "parsed": result.value, "attempts": result.attempts}
             self.event("llm", f"{prompt_name}@v{prompt_version}", sent, out, model_id=result.model_id,
                        elapsed_ms=elapsed_ms)
+            self.llm_model = result.model_id
             return
         out = {"raw": getattr(error, "raw", None), "attempts": getattr(error, "attempts", [])}
         self.event("llm", f"{prompt_name}@v{prompt_version}", sent, out, model_id=getattr(error, "model_id", None),

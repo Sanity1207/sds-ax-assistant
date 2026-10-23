@@ -18,8 +18,9 @@ from dataclasses import dataclass
 from typing import Protocol
 
 MAX_INPUT_CHARS = 2000
-BLOCK_MESSAGE = ("입력 검사에서 막힌 요청입니다(유형: {category}). 이 입력은 비서에게 보내지 않았습니다. "
-                 "매핑·이슈 조사에 관한 질문으로 다시 입력해 주세요. 처리안 반영은 승인 카드로만 할 수 있습니다.")
+# 차단 안내는 모든 경우에 같은 문장이다. 어떤 유형·규칙에 걸렸는지는 사용자에게 알리지 않는다(우회 힌트가 되므로).
+# 유형·단계·규칙은 처리 기록(branch '입력 검사' 이벤트)에만 남긴다.
+BLOCK_MESSAGE = "이 요청은 처리할 수 없습니다. 매핑·이슈 조사에 관한 질문으로 다시 입력해 주세요."
 
 # 폭 없는 문자·방향 표시 문자(정규화 때 지운다).
 _INVISIBLE = re.compile(r"[​-‏⁠-⁤﻿­]")
@@ -36,7 +37,7 @@ class Normalized:
 
 @dataclass(frozen=True)
 class Verdict:
-    """차단 판정. category = 유형 이름(안내 문장에 보임), stage = 걸린 단계, rule = 걸린 규칙(기록용)."""
+    """차단 판정. category = 유형 이름, stage = 걸린 단계, rule = 걸린 규칙. 셋 다 처리 기록용이고 사용자에게 보이지 않는다."""
 
     category: str
     stage: str
@@ -44,7 +45,8 @@ class Verdict:
 
     @property
     def message(self) -> str:
-        return BLOCK_MESSAGE.format(category=self.category)
+        """사용자에게 보이는 안내. 판정 내용과 상관없이 늘 같은 문장이다."""
+        return BLOCK_MESSAGE
 
 
 def normalize(text: str) -> Normalized:

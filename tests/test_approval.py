@@ -524,3 +524,24 @@ def test_edit_other_issue_impossible(db_path):
                                       llm=fake_llm(model)))
     assert bad.pending["stage"] == "edit" and any("VESSEL_ID 칸 값 V003" in e or "ACTION_SEQ 칸 값 104" in e
                                                   for e in bad.errors)
+
+
+# ---- 처리 기록: 승인 응답 실행의 도구 수·응답 모델 ----
+
+def test_record_approval_run_has_own_counts(db_path):
+    thread, _, _ = propose(2, CREATE_2)
+    asyncio.run(answer_approval(thread, "y"))
+    runs = connect().execute("SELECT RUN_KIND, RESULT, TOOL_CALLS, MODEL_ID FROM PROCESS_LOG ORDER BY rowid").fetchall()
+    # 대화 입력은 도구 1회·모델 기록, 승인 응답은 도구를 부르지 않았고 LLM도 부르지 않았다.
+    assert [tuple(r) for r in runs] == [("대화 입력", "승인 대기", 1, "f"), ("승인 응답", "답변 완료", 0, None)]
+
+
+def test_record_approval_failure_run_records_finalize_model(db_path):
+    thread, _, model = propose(2, CREATE_2, extra=[explain])
+    conn = connect()
+    with conn:
+        conn.execute("UPDATE ISSUE SET STATUS = '거절', PROCESSED_AT = '2026-10-23 09:00:00', PROCESSOR_ID = 'A002'"
+                     " WHERE ISSUE_NO = 2")
+    asyncio.run(answer_approval(thread, "y", llm=fake_llm(model)))
+    run = connect().execute("SELECT RESULT, TOOL_CALLS, MODEL_ID FROM PROCESS_LOG ORDER BY rowid DESC").fetchone()
+    assert tuple(run) == ("멈춤", 0, "f")  # 실행 실패 설명에 LLM을 불렀으므로 그 모델을 남긴다
