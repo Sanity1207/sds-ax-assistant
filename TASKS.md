@@ -106,7 +106,7 @@
 
 ## 묶음 8 · 평가
 
-- [ ] **T33 평가셋 15건** — `eval/cases.jsonl`: 자동 분류 4 / ② 3 / ① 4 / ③ 2 / ④ 2. 케이스마다 입력, 미리 정한 y/n/e·편집 값, 필수 핵심 사실, 필수 도구, 기대 담당자·처리상태.
+- [x] **T33 평가셋 15건** — `eval/cases.jsonl`: 자동 분류 4 / ② 3 / ① 4 / ③ 2 / ④ 2. 케이스마다 입력, 미리 정한 y/n/e·편집 값, 필수 핵심 사실, 필수 도구, 기대 담당자·처리상태.
   - 확인: 로드 스크립트로 15건·분포 4/3/4/2/2·필수 필드 누락 0 확인
 - [ ] **T34 평가 실행기** — 분류 함수·비서 그래프 직접 호출, 케이스마다 DB 시드 초기화, fake/bedrock 모드, 안전 지표 6종 DB 판정, JSON Lines(case_id·pass·위반·모드·응답 모델·RUN_ID).
   - 확인: `pytest -q tests/test_eval_runner.py -k run` — fake 모드 15건 실행, 안전 지표 위반 0
@@ -169,6 +169,7 @@ Claude Code로 구현하는 기준이다. 작업당 15~25분(작성 + 가짜 LLM
 - 2026-10-23 T31 완료: register_issue(parent_issue_no=)·precheck가 원래 건(있음·반려·요청자 본인)을 검사, PARENT_ISSUE_NO 저장. 이슈대장 상세에 반려 건의 원래 요청자 본인에게만 [수정해서 재요청], 값이 채워진 등록 폼(재요청 안내·그만두기). 원래 건 불변. tests/test_reapply.py -k reapply 10건
 - 2026-10-23 T32 완료: 비서 프롬프트 v4에 [반려 건 재요청 도움](ID 후보 목록, 고객 안내 초안은 {고객:요청자 ID} 자리표시), fill_customer_names가 화면 표시 단계에서 USER_MST 이름으로 채움(LLM에는 ID만, MESSAGE_LOG엔 원문, 발송 없음). tests/test_reapply.py 전체 15건
 - 2026-10-23 묶음 7(T31~T32) 완료: 결정 사항은 REPORT_묶음7.md
+- 2026-10-23 T33 완료: eval/cases.jsonl 15건(자동 분류 4: 매핑 생성·VESSEL 이관·ID 불일치 반려·지시문 섞인 문의 / ② 3: 이름→ID·ACTION 개수·날씨 거절 / ① 4: #2 생성 y·#3 수정 편집 후 y·#4 삭제 이중 확인·#7 이관 완료 / ③ 2: #5 매핑 오류·이름 불만 이관 성격 / ④ 2: #8 ID 후보·#9 안내 초안). app/evaluate.py load_cases·validate_case, `python -m app.evaluate --check`. tests/test_eval_runner.py 3건
 
 ## 실제 Bedrock 점검 목록
 
