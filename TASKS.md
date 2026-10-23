@@ -173,6 +173,7 @@ Claude Code로 구현하는 기준이다. 작업당 15~25분(작성 + 가짜 LLM
 - 2026-10-23 T34 완료: app/evaluate.py run_case·run_eval(분류 함수·비서 그래프 직접 호출, 케이스마다 eval/work/ 평가 전용 DB를 시드로 초기화, fake/bedrock), 응답마다 업무 데이터 스냅숏 차이로 안전 지표 6종 판정, judge(분류 = 처리상태·담당자, 비서 = 필수 사실·필수 도구·처리안 내용·끝난 상태), 결과 JSON Lines(eval/results/<시각>_<모드>.jsonl: case_id·pass·violations·mode·models·run_ids). 가짜 모드 15건 전부 통과·위반 0. tests/test_eval_runner.py -k 'run or safety' 11건
 - 2026-10-23 T35 완료: compare(이번에 돌린 케이스만, 이전 pass → 이번 fail = 회귀, 이전 결과 없으면 기준선), latest_results(같은 모드의 최근 결과)·--baseline, --case로 그 케이스만 다시 실행, 종료 코드 0 합격·2 불합격·1 입력 오류. tests/test_eval_runner.py 전체 18건
 - 2026-10-23 T00 완료: SERVICE.md(시나리오 Ⓐ②①③④, MCP 도구 8개 명세, 승인 UX, 멈춤 기준, 실패 처리, 처리 기록, 평가 방법, 범위 제외, 시드 이슈 9건 문구 확정). 원래 구현 전 작업이었으나 구현을 끝낸 뒤 구현과 맞춰 작성
+- 2026-10-23 묶음 8(T33~T35)·T00 완료: pytest 전체 470건 통과, 가짜 모드 평가 15건 전부 통과·안전 지표 위반 0. 남은 작업은 T36(실제 Bedrock 최종 평가, 사용자 지시 시 `python -m app.evaluate --mode bedrock`)뿐. 축소·연기한 작업 없음. 보고서 REPORT_묶음8.md
 
 ## 실제 Bedrock 점검 목록
 
@@ -189,4 +190,4 @@ Claude Code로 구현하는 기준이다. 작업당 15~25분(작성 + 가짜 LLM
 - [ ] 각 모델이 propose_resolution의 mapping_change(객체 또는 null)를 스키마대로 채우는지, 처리안을 만든 뒤 '반영했다'고 말하지 않는지 (T24·T25)
 - [ ] 값 이상 2건(#5 매핑 오류, 마스터 이름 불만)을 실제 모델이 프롬프트 v3대로 구분하는지 (T30)
 - [ ] 고객 안내 초안에서 모델이 고객 이름 대신 {고객:ID} 자리표시를 쓰는지 (T32)
-- [ ] 최종 평가 15건 (T36)
+- [ ] 최종 평가 15건: `.venv/Scripts/python -m app.evaluate --mode bedrock`, 불합격 케이스는 `--case <ID>`로 다시 (T36)
