@@ -1,6 +1,9 @@
 from app.classify import FAILED_RESULT, Classification, classify_issue, register_issue
 from app.db import connect
 from app.fake_llm import FakeChatModel, FakeLLMError, fake_llm
+from app.seed import ISSUES
+
+NEW_NO = len(ISSUES) + 1  # 시드 이슈 다음 번호
 
 CREATE = {"type": "매핑 생성", "master_target": None, "multiple_requests": False,
           "id_mismatch": False, "reason": "V003에 104를 추가해 달라는 요청"}
@@ -16,10 +19,10 @@ def test_skeleton_register_creates_issue(db_path):
     model = FakeChatModel("fake-1", [CREATE])
     out = register_issue("C001", "V003", "104", "V003에 104 추가해 주세요", fake_llm(model), conn)
 
-    rows = conn.execute("SELECT * FROM ISSUE").fetchall()
+    rows = conn.execute("SELECT * FROM ISSUE WHERE ISSUE_NO > ?", (len(ISSUES),)).fetchall()
     assert len(rows) == 1
     row = rows[0]
-    assert row["ISSUE_NO"] == out.issue_no == 1
+    assert row["ISSUE_NO"] == out.issue_no == NEW_NO
     assert (row["STATUS"], row["OWNER_ROLE"]) == ("처리대기", "매핑 담당자")
     assert row["RESULT"] == "매핑 생성 요청으로 분류. 근거: V003에 104를 추가해 달라는 요청"
     assert row["REQUESTER_ID"] == "C001" and row["PROCESSED_AT"] is None and row["PROCESSOR_ID"] is None
@@ -57,7 +60,7 @@ def test_skeleton_reclassify_updates_same_issue(db_path):
     first = register_issue("C001", "V003", "104", "V003에 104 추가", fake_llm(FakeChatModel("f", error=FakeLLMError("x"))))
     again = classify_issue(first.issue_no, fake_llm(FakeChatModel("f", [CREATE])))
     conn = connect()
-    assert conn.execute("SELECT COUNT(*) FROM ISSUE").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM ISSUE").fetchone()[0] == NEW_NO
     assert again.issue_no == first.issue_no and again.status == "처리대기"
 
 

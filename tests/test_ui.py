@@ -2,6 +2,9 @@ from streamlit.testing.v1 import AppTest
 
 from app.config import ROOT
 from app.db import connect
+from app.seed import ISSUES
+
+NEW_NO = len(ISSUES) + 1  # 시드 이슈 다음 번호
 
 MAIN = str(ROOT / "app" / "main.py")
 
@@ -25,18 +28,18 @@ def register(at, vessel, action, inquiry):
 
 def test_skeleton_register_then_ledger_row(db_path):
     at = register(open_app(), "V003", "104", "V003에 104 추가해 주세요")
-    assert at.success[0].value.startswith("접수됨 #1, 처리상태: 처리대기")
+    assert at.success[0].value.startswith(f"접수됨 #{NEW_NO}, 처리상태: 처리대기")
 
     at.sidebar.radio(key="page").set_value("이슈대장").run()
     table = at.dataframe[0].value
-    assert list(table["번호"]) == [1]
+    assert table.iloc[0]["번호"] == NEW_NO and len(table) == NEW_NO
     assert table.iloc[0]["VESSEL_ID"] == "V003" and table.iloc[0]["처리상태"] == "처리대기"
 
 
 def test_skeleton_investigate_shows_answer(db_path):
     at = register(open_app(), "V003", "104", "V003에 104 추가해 주세요")
     at.sidebar.radio(key="page").set_value("이슈대장").run()
-    at.button(key="investigate_1").click().run()
+    at.button(key=f"investigate_{NEW_NO}").click().run()
     assert not at.exception
     assert at.sidebar.radio(key="page").value == "조사 비서"
     answers = [m for m in at.chat_message if m.name == "assistant"]
@@ -51,7 +54,7 @@ def test_skeleton_investigate_shows_answer(db_path):
 
 def test_skeleton_empty_inquiry_not_saved(db_path):
     register(open_app(), "V003", "104", "   ")
-    assert connect().execute("SELECT COUNT(*) FROM ISSUE").fetchone()[0] == 0
+    assert connect().execute("SELECT COUNT(*) FROM ISSUE").fetchone()[0] == len(ISSUES)
 
 
 def test_skeleton_ledger_is_read_only(db_path):
