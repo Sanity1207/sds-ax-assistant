@@ -435,3 +435,92 @@ def test_double_confirm_n_cancels(db_path):
 def test_double_confirm_not_needed_for_write(db_path):
     thread, _, _ = propose(3, UPDATE_3)  # 미수행(N) 매핑 수정 = write
     assert asyncio.run(answer_approval(thread, "y")).answer.startswith("반영 완료")
+
+
+# ---- T28: e 직접 편집 ----
+
+from app.agent import EDIT_REPLY, EDIT_WAIT  # noqa: E402
+
+
+def to_edit(issue, change, status="완료", **kw):
+    thread, _, model = propose(issue, change, status, **kw)
+    calls = len(model.calls)
+    edit = asyncio.run(answer_approval(thread, "E", llm=fake_llm(model)))
+    assert edit.answer == EDIT_REPLY and edit.pending["stage"] == "edit" and len(model.calls) == calls
+    return thread, model
+
+
+def test_edit_starts_with_fixed_sentence(db_path):
+    thread, model = to_edit(3, UPDATE_3)
+    for text in ["y", "수정할게요", ""]:
+        again = asyncio.run(answer_approval(thread, text, llm=fake_llm(model)))
+        assert again.answer == EDIT_WAIT and again.pending["stage"] == "edit" and not again.llm_called
+
+
+@pytest.mark.parametrize("edited, part", [
+    ({"mapping_change": UPDATE_3, "new_status": "반려", "result": "x"}, "새 상태는 완료뿐"),
+    ({"mapping_change": dict(UPDATE_3, new_action_seq="999"), "new_status": "완료", "result": "x"}, "ACTION_MST에 없습니다"),
+    ({"mapping_change": None, "new_status": "완료", "result": "x"}, "매핑 변경이 있어야 완료"),
+    ({"mapping_change": UPDATE_3, "new_status": "보류", "result": "x"}, "허용되지 않습니다"),
+])
+def test_edit_rejects_invalid(db_path, edited, part):
+    thread, model = to_edit(3, UPDATE_3)
+    before = business()
+    bad = asyncio.run(answer_approval(thread, edited=edited, llm=fake_llm(model)))
+    assert bad.pending["stage"] == "edit" and any(part in e for e in bad.errors)
+    assert bad.answer.startswith("편집한 처리안이 검사에서 거부됐습니다")
+    assert business() == before and logs(3) == []
+
+
+def test_edit_valid_new_card_then_execute(db_path):
+    thread, model = to_edit(3, UPDATE_3)
+    edited = {"mapping_change": dict(UPDATE_3, new_action_seq="104"), "new_status": "완료", "result": "냉각으로 교체"}
+    card = asyncio.run(answer_approval(thread, edited=edited, llm=fake_llm(model)))
+    assert card.pending["stage"] == "card" and card.pending["edited"]
+    assert card.pending["card"]["after"] == ["V003→103 없음", "V003→104 냉각 · 미수행 N(새 행)"]
+    assert card.answer.startswith("[승인 카드]")
+    assert [k for k, _, _ in logs(3)] == ["직접 편집"]
+    assert "V003→105" in logs(3)[0][1] and "V003→104" in logs(3)[0][1]
+    done = asyncio.run(answer_approval(thread, "y", llm=fake_llm(model)))
+    assert done.answer == "관리자가 처리안을 직접 수정해 승인함. 반영 완료: [매핑 변경] V003→103 삭제, V003→104 생성, #3 완료"
+    assert mapping("V003", "104") == ("V003", "104", "N", None) and mapping("V003", "105") is None
+    edit_event = connect().execute("SELECT INPUT FROM CALL_LOG WHERE EVENT_KIND = 'approval' AND NAME = '직접 편집'").fetchone()[0]
+    assert json.loads(edit_event)["before"]["mapping_change"]["new_action_seq"] == "105"
+
+
+def test_edit_recomputes_risk(db_path):
+    """변경 없는 반려 처리안(write)을 수행된 매핑 삭제(destructive)로 고치면 위험 등급을 다시 계산해 이중 확인을 묻는다."""
+    thread, model = to_edit(4, None, status="반려", result="요청 불명확")
+    edited = {"mapping_change": DELETE_4, "new_status": "완료", "result": "배출 공정 중단 확인"}
+    card = asyncio.run(answer_approval(thread, edited=edited, llm=fake_llm(model)))
+    assert card.pending["proposal"]["risk"] == "destructive" and card.pending["card"]["executed_yn"] == "Y"
+    confirm = asyncio.run(answer_approval(thread, "y", llm=fake_llm(model)))
+    assert confirm.answer == CONFIRM_QUESTION.format(n=4)
+    done = asyncio.run(answer_approval(thread, "4", llm=fake_llm(model)))
+    assert done.answer.endswith("반영 완료: [매핑 변경] V004→105 삭제, #4 완료")
+
+
+def test_edit_cancel_during_edit(db_path):
+    thread, model = to_edit(2, CREATE_2)
+    before = business()
+    done = asyncio.run(answer_approval(thread, "n", llm=fake_llm(model)))
+    assert done.answer == CANCELLED and business() == before
+
+
+def test_edit_cancel_after_edit(db_path):
+    thread, model = to_edit(2, CREATE_2)
+    asyncio.run(answer_approval(thread, edited={"mapping_change": None, "new_status": "반려", "result": "중복 요청"},
+                                llm=fake_llm(model)))
+    before = business()
+    done = asyncio.run(answer_approval(thread, "n", llm=fake_llm(model)))
+    assert done.answer == CANCELLED and business() == before
+    assert [k for k, _, _ in logs(2)] == ["직접 편집", "취소"]
+
+
+def test_edit_other_issue_impossible(db_path):
+    """편집 폼은 그 이슈만 다룬다: 편집 값에 다른 이슈의 입력칸을 넣어도 거부된다."""
+    thread, model = to_edit(2, CREATE_2)
+    bad = asyncio.run(answer_approval(thread, edited={"mapping_change": UPDATE_3, "new_status": "완료", "result": "x"},
+                                      llm=fake_llm(model)))
+    assert bad.pending["stage"] == "edit" and any("VESSEL_ID 칸 값 V003" in e or "ACTION_SEQ 칸 값 104" in e
+                                                  for e in bad.errors)

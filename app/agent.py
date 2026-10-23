@@ -316,7 +316,7 @@ def prompt_for(pending: dict) -> str:
     if pending["stage"] == "confirm":
         return CONFIRM_QUESTION.format(n=n)
     if pending["stage"] == "edit":
-        return EDIT_WAIT
+        return EDIT_REPLY
     return card_text(pending["card"]) + "\n" + CARD_QUESTION
 
 
