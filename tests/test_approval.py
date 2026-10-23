@@ -373,3 +373,65 @@ def test_execute_failure_finalize_llm_down_uses_python_sentence(db_path):
     failed = asyncio.run(answer_approval(thread, "y", llm=down))
     assert failed.answer.startswith("처리안을 반영하지 못했습니다(실행 실패: 재검증 실패")
     assert "승인한 처리안을 반영하지 못해 아무것도 바꾸지 않았습니다" in failed.answer
+
+
+# ---- T27: n 취소 + destructive 이중 확인 ----
+
+from app.agent import CANCELLED, CONFIRM_QUESTION, CONFIRM_RETRY  # noqa: E402
+
+
+@pytest.mark.parametrize("text", ["n", " N "])
+def test_cancel_changes_nothing(db_path, text):
+    thread, _, model = propose(2, CREATE_2)
+    before = business()
+    calls = len(model.calls)
+    done = asyncio.run(answer_approval(thread, text, llm=fake_llm(model)))
+    assert done.answer == CANCELLED and done.pending is None
+    assert business() == before and len(model.calls) == calls
+    assert [k for k, _, _ in logs(2)] == ["취소"]
+    event = connect().execute("SELECT NAME FROM CALL_LOG WHERE EVENT_KIND = 'approval' ORDER BY rowid DESC").fetchone()[0]
+    assert event == "취소"
+    assert asyncio.run(pending_approval(thread)) is None
+
+
+def test_cancel_leaves_short_context(db_path):
+    thread, _, _ = propose(2, CREATE_2)
+    asyncio.run(answer_approval(thread, "n"))
+    model = FakeChatModel("f", [AIMessage("알겠습니다.")])
+    asyncio.run(run_turn(thread, "왜 취소됐지?", fake_llm(model)))
+    sent = model.calls[0][1]
+    assert [m.content for m in sent if isinstance(m, AIMessage)][-1] == CANCELLED
+    # 같은 이슈의 처리안은 다시 만들 수 있다.
+    _, again, _ = propose(2, CREATE_2)
+    assert again.pending is not None
+
+
+def test_double_confirm_required_for_destructive(db_path):
+    thread, _, model = propose(4, DELETE_4, result="배출 공정 중단")
+    before = business()
+    first = asyncio.run(answer_approval(thread, "y", llm=fake_llm(model)))
+    assert first.answer == CONFIRM_QUESTION.format(n=4) and first.pending["stage"] == "confirm"
+    assert business() == before  # y만으로는 반영하지 않는다
+    for wrong in ["5", "#4", "4번", "y", "yes", "", "44"]:  # 틀리면 몇 번이든 다시 묻는다
+        again = asyncio.run(answer_approval(thread, wrong, llm=fake_llm(model)))
+        assert again.answer == CONFIRM_RETRY.format(n=4) and not again.llm_called
+        assert business() == before
+    done = asyncio.run(answer_approval(thread, " 4 ", llm=fake_llm(model)))
+    assert done.answer == "반영 완료: [매핑 변경] V004→105 삭제, #4 완료"
+    assert mapping("V004", "105") is None
+    approval = connect().execute("SELECT INPUT, OUTPUT FROM CALL_LOG WHERE EVENT_KIND = 'approval' AND NAME = '승인'").fetchone()
+    assert json.loads(approval["OUTPUT"]) == {"double_confirm": "통과"}
+
+
+def test_double_confirm_n_cancels(db_path):
+    thread, _, _ = propose(4, DELETE_4)
+    before = business()
+    asyncio.run(answer_approval(thread, "y"))
+    done = asyncio.run(answer_approval(thread, "n"))
+    assert done.answer == CANCELLED and business() == before
+    assert [k for k, _, _ in logs(4)] == ["취소"]
+
+
+def test_double_confirm_not_needed_for_write(db_path):
+    thread, _, _ = propose(3, UPDATE_3)  # 미수행(N) 매핑 수정 = write
+    assert asyncio.run(answer_approval(thread, "y")).answer.startswith("반영 완료")
