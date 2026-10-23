@@ -23,6 +23,9 @@ MCP 연결과 체크포인터는 대화 입력 1회(run_turn)마다 열고 닫�
 연결을 오래 붙잡지 않는 편이 단순하다. 그래프 상태는 체크포인터 DB에 남아 다음 입력에서 이어진다.
 MCP 서버에는 행동한 관리자와 화면의 이슈를 환경변수로 넘긴다(LLM이 바꿀 수 없는 값).
 
+관리자 자유 입력은 LLM에 가기 전에 guard 체인(app/guard.py)을 거친다. 막히면 LLM 없이 정해진 안내 문장으로 답하고
+branch 이벤트('입력 검사')를 남긴다. 첫 질문 답(y/n) 같은 고정 입력은 Python이 판정하므로 guard를 거치지 않는다.
+
 처리 기록: 대화 입력 1회 = 실행 1회('대화 입력'). 관리자 입력·비서 답은 MESSAGE_LOG, LLM 호출은 llm,
 도구 호출은 tool, should_stop의 갈림·첫 질문 판정은 branch, 마무리는 finalize 이벤트로 남는다.
 """
@@ -45,6 +48,7 @@ from app import config
 from app.auth import require
 from app.config import KST
 from app.db import connect
+from app.guard import run_guard
 from app.llm import FallbackLLM, LLMError, get_llm
 from app.mcp_server import server_command
 from app.recorder import Run, Timer, start_run
@@ -76,6 +80,8 @@ FIRST_YES_REQUEST = ("이슈 #{n} 건을 조사해 주세요. 필요한 도구�
                      "처리할 수 있으면 propose_resolution으로 처리안을 만들어 주세요.")
 # 첫 질문 교환(질문·y/n 답·다시 묻기)에 붙이는 표시. 화면에는 보이고 LLM 입력에서는 뺀다.
 FIRST_TAG = "first_question"
+# guard 체인에 막힌 입력과 그 안내 문장. 화면에는 보이고 LLM 입력에서는 뺀다.
+BLOCKED_TAG = "guard_blocked"
 # 첫 질문에 y로 답했을 때 Python이 만든 조사 요청. LLM에는 보내고 화면에는 감춘다(관리자가 친 말은 y).
 REQUEST_TAG = "first_question_request"
 
@@ -122,7 +128,7 @@ def tools_for_mode(tools: list, mode: str) -> list:
 
 def llm_view(messages: list[BaseMessage]) -> list[BaseMessage]:
     """LLM에 보낼 대화: 첫 질문 교환을 빼고, 맨 앞이 관리자 말이 되게 한다(Bedrock은 user로 시작해야 한다)."""
-    kept = [m for m in messages if getattr(m, "name", None) != FIRST_TAG]
+    kept = [m for m in messages if getattr(m, "name", None) not in (FIRST_TAG, BLOCKED_TAG)]
     while kept and not isinstance(kept[0], HumanMessage):
         kept.pop(0)
     return kept
@@ -290,6 +296,8 @@ async def run_turn(thread_id: str, text: str, llm: FallbackLLM | None = None, *,
         mode = issue_mode(issue_no)
         async with open_checkpointer() as saver:
             first = await _first_question(saver, thread_id, text, issue_no, mode, run)
+            if first is None and (verdict := run_guard(text)):
+                return await _blocked(saver, thread_id, text, verdict, mode, run)
         if isinstance(first, TurnResult):
             return first
         human = first or HumanMessage(text)
@@ -343,6 +351,20 @@ async def _first_question(saver, thread_id: str, text: str, issue_no: int | None
     await graph.aupdate_state(_config(thread_id), update, as_node="finalize")
     run.message("비서", reply)
     run.finish("첫 질문 다시 묻기" if answer is None else "자유 대화 시작")
+    state = (await graph.aget_state(_config(thread_id))).values
+    return TurnResult(reply, None, state["messages"], 0, llm_called=False, mode=mode)
+
+
+async def _blocked(saver, thread_id: str, text: str, verdict, mode: str, run: Run) -> TurnResult:
+    """guard 체인이 막은 입력: LLM 없이 정해진 안내 문장으로 답하고 branch 이벤트를 남긴다(도구 예산 안 씀)."""
+    run.event("branch", "입력 검사", {"input": text},
+              {"blocked": True, "category": verdict.category, "stage": verdict.stage, "rule": verdict.rule})
+    graph = build_graph(None, [], saver)
+    reply = verdict.message
+    await graph.aupdate_state(_config(thread_id), {
+        "messages": [HumanMessage(text, name=BLOCKED_TAG), AIMessage(reply, name=BLOCKED_TAG)]}, as_node="finalize")
+    run.message("비서", reply)
+    run.finish("입력 차단", tool_calls=0)
     state = (await graph.aget_state(_config(thread_id))).values
     return TurnResult(reply, None, state["messages"], 0, llm_called=False, mode=mode)
 
