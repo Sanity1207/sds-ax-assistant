@@ -5,6 +5,9 @@
 
 묶음 1(T04)은 규칙표에 '매핑 생성 → 처리대기, 매핑 담당자' 한 줄만 있다. 나머지 유형은 규칙표 전체(T15)가
 들어올 때까지 '판단 불가'와 같은 확인필요·매핑 담당자로 둔다.
+
+처리 기록: 문의 등록은 실행 1회('문의 등록', 사용자 SYSTEM, thread 없음)이고, 등록 전 검사·규칙표 분기는 branch,
+분류 LLM 호출은 llm 이벤트로 남는다. 업무 쓰기(INSERT·UPDATE)는 짧은 트랜잭션으로 하고, 기록은 그 앞뒤에 한다.
 """
 
 import sqlite3
@@ -17,6 +20,7 @@ from pydantic import BaseModel, Field, field_validator
 from app.config import now_kst
 from app.db import connect
 from app.llm import FallbackLLM, LLMError, get_llm
+from app.recorder import Run, Timer, start_run
 
 InquiryType = Literal["매핑 생성", "매핑 수정", "매핑 삭제", "값 이상", "마스터 요청", "담당 외", "판단 불가"]
 MasterTarget = Literal["VESSEL", "ACTION", "둘 다", "모름"]
@@ -121,52 +125,72 @@ def register_issue(requester_id: str, vessel_id: str, action_seq: str, inquiry: 
     own = conn is None
     conn = conn or connect()
     try:
-        with conn:
-            # 분류가 끝나기 전에 앱이 멈춰도 [다시 분류]로 이어갈 수 있도록 '자동 분류 실패' 확인필요로 먼저 저장한다.
-            issue_no = conn.execute(
-                "INSERT INTO ISSUE (RECEIVED_AT, REQUESTER_ID, VESSEL_ID, ACTION_SEQ, INQUIRY, OWNER_ROLE, STATUS, RESULT)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (now_kst(), requester_id, vessel_id, action_seq, inquiry, UNDECIDED[1], UNDECIDED[0], FAILED_RESULT),
-            ).lastrowid
-        return classify_issue(issue_no, llm, conn)
+        with start_run("문의 등록", "SYSTEM") as run:
+            submitted = {"requester_id": requester_id, "vessel_id": vessel_id, "action_seq": action_seq,
+                         "inquiry": inquiry}
+            run.event("branch", "등록 전 검사", submitted, "통과")
+            with conn:
+                # 분류가 끝나기 전에 앱이 멈춰도 [다시 분류]로 이어갈 수 있도록 '자동 분류 실패' 확인필요로 먼저 저장한다.
+                issue_no = conn.execute(
+                    "INSERT INTO ISSUE (RECEIVED_AT, REQUESTER_ID, VESSEL_ID, ACTION_SEQ, INQUIRY, OWNER_ROLE, STATUS,"
+                    " RESULT) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (now_kst(), requester_id, vessel_id, action_seq, inquiry, UNDECIDED[1], UNDECIDED[0],
+                     FAILED_RESULT),
+                ).lastrowid
+            run.set_issue(issue_no)
+            return _classify(issue_no, llm, conn, run)
     finally:
         if own:
             conn.close()
 
 
-def classify_issue(issue_no: int, llm: FallbackLLM | None = None,
-                   conn: sqlite3.Connection | None = None) -> ClassifyOutcome:
-    """저장된 이슈 1건을 분류해 담당자·처리상태·처리결과를 갱신한다. 매핑은 바꾸지 않는다."""
+def classify_issue(issue_no: int, llm: FallbackLLM | None = None, conn: sqlite3.Connection | None = None,
+                   user_id: str = "SYSTEM") -> ClassifyOutcome:
+    """저장된 이슈 1건을 다시 분류한다([다시 분류]). 처리 기록에는 새 실행('다시 분류')으로 남는다."""
     own = conn is None
     conn = conn or connect()
-    llm = llm or get_llm()
     try:
-        row = conn.execute(
-            "SELECT I.*, V.VESSEL_NAME, A.ACTION_DESCRIPTION FROM ISSUE I"
-            " JOIN VESSEL_MST V ON V.VESSEL_ID = I.VESSEL_ID JOIN ACTION_MST A ON A.ACTION_SEQ = I.ACTION_SEQ"
-            " WHERE I.ISSUE_NO = ?", (issue_no,)).fetchone()
-        if row is None:
-            raise ValueError(f"이슈 #{issue_no}가 없습니다.")
-        try:
-            answer = llm.structured(build_messages(row), Classification)
-        except LLMError as e:
-            # 스키마 오류·모든 모델 실패: 저장해 둔 '자동 분류 실패' 확인필요를 그대로 둔다(배너 없음).
-            with conn:
-                conn.execute("UPDATE ISSUE SET OWNER_ROLE = ?, STATUS = ?, RESULT = ?, PROCESSED_AT = NULL,"
-                             " PROCESSOR_ID = NULL WHERE ISSUE_NO = ?",
-                             (UNDECIDED[1], UNDECIDED[0], FAILED_RESULT, issue_no))
-            return ClassifyOutcome(issue_no, UNDECIDED[0], UNDECIDED[1], FAILED_RESULT, error=str(e))
-
-        c = answer.value
-        status, owner = decide(c)
-        result = result_text(c)
-        closed = status in CLOSED_STATUSES
-        with conn:
-            conn.execute(
-                "UPDATE ISSUE SET OWNER_ROLE = ?, STATUS = ?, RESULT = ?, PROCESSED_AT = ?, PROCESSOR_ID = ?"
-                " WHERE ISSUE_NO = ?",
-                (owner, status, result, now_kst() if closed else None, "SYSTEM" if closed else None, issue_no))
-        return ClassifyOutcome(issue_no, status, owner, result, answer.model_id, c)
+        with start_run("다시 분류", user_id, issue_no) as run:
+            return _classify(issue_no, llm, conn, run)
     finally:
         if own:
             conn.close()
+
+
+def _classify(issue_no: int, llm: FallbackLLM | None, conn: sqlite3.Connection, run: Run) -> ClassifyOutcome:
+    """이슈 1건을 분류해 담당자·처리상태·처리결과를 갱신한다. 매핑은 바꾸지 않는다."""
+    llm = llm or get_llm()
+    row = conn.execute(
+        "SELECT I.*, V.VESSEL_NAME, A.ACTION_DESCRIPTION FROM ISSUE I"
+        " JOIN VESSEL_MST V ON V.VESSEL_ID = I.VESSEL_ID JOIN ACTION_MST A ON A.ACTION_SEQ = I.ACTION_SEQ"
+        " WHERE I.ISSUE_NO = ?", (issue_no,)).fetchone()
+    if row is None:
+        raise ValueError(f"이슈 #{issue_no}가 없습니다.")
+    messages = build_messages(row)
+    timer = Timer()
+    try:
+        answer = llm.structured(messages, Classification)
+    except LLMError as e:
+        run.llm(PROMPT_NAME, PROMPT_VERSION, messages, error=e, elapsed_ms=timer.ms)
+        run.event("branch", "분류 실패", type(e).__name__, {"status": UNDECIDED[0], "owner_role": UNDECIDED[1]})
+        # 스키마 오류·모든 모델 실패: 저장해 둔 '자동 분류 실패' 확인필요를 그대로 둔다(배너 없음).
+        with conn:
+            conn.execute("UPDATE ISSUE SET OWNER_ROLE = ?, STATUS = ?, RESULT = ?, PROCESSED_AT = NULL,"
+                         " PROCESSOR_ID = NULL WHERE ISSUE_NO = ?",
+                         (UNDECIDED[1], UNDECIDED[0], FAILED_RESULT, issue_no))
+        run.finish(FAILED_RESULT, model_id=getattr(e, "model_id", None))
+        return ClassifyOutcome(issue_no, UNDECIDED[0], UNDECIDED[1], FAILED_RESULT, error=str(e))
+
+    run.llm(PROMPT_NAME, PROMPT_VERSION, messages, result=answer, elapsed_ms=timer.ms)
+    c = answer.value
+    status, owner = decide(c)
+    result = result_text(c)
+    run.event("branch", "규칙표", c, {"status": status, "owner_role": owner})
+    closed = status in CLOSED_STATUSES
+    with conn:
+        conn.execute(
+            "UPDATE ISSUE SET OWNER_ROLE = ?, STATUS = ?, RESULT = ?, PROCESSED_AT = ?, PROCESSOR_ID = ?"
+            " WHERE ISSUE_NO = ?",
+            (owner, status, result, now_kst() if closed else None, "SYSTEM" if closed else None, issue_no))
+    run.finish("분류 완료", model_id=answer.model_id)
+    return ClassifyOutcome(issue_no, status, owner, result, answer.model_id, c)

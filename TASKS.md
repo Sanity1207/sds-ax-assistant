@@ -42,7 +42,7 @@
 
 - [x] **T09 나머지 테이블 + 시드 이슈 9건** — OWNER_MST, RESOLUTION_LOG(append-only), PROCESS_LOG, CALL_LOG, MESSAGE_LOG. 시드 이슈 9건(처리대기 3·확인필요 2·이관 1·반려 2(입력칸·문의 ID 불일치, 요청 두 개)·완료 1, 문구는 SERVICE.md). PROCESS_LOG.USER_ID → USER_MST FOREIGN KEY.
   - 확인: `pytest -q tests/test_seed.py` — 상태별 건수, 요청자 모두 C001~C004, 담당자·처리상태 CHECK 위반 INSERT 실패
-- [ ] **T10 처리 기록 장치** — 실행 시작/끝(PROCESS_LOG), 이벤트 기록(CALL_LOG: branch·llm·tool·approval·commit·finalize), MESSAGE_LOG. 업무 트랜잭션과 다른 연결로 즉시 커밋. 분류·비서에 연결.
+- [x] **T10 처리 기록 장치** — 실행 시작/끝(PROCESS_LOG), 이벤트 기록(CALL_LOG: branch·llm·tool·approval·commit·finalize), MESSAGE_LOG. 업무 트랜잭션과 다른 연결로 즉시 커밋. 분류·비서에 연결.
   - 확인: `pytest -q tests/test_trace.py -k record` — 등록 1회 → PROCESS_LOG 1행(USER_ID=SYSTEM, THREAD_ID NULL), CALL_LOG에 llm·branch 이벤트; 업무 트랜잭션 롤백 후에도 기록 유지
 - [ ] **T11 처리 기록 출력 명령** — `python -m app.trace --issue <no>` / `--thread <id>` / `--list`, 시간순 md 파일, 이벤트마다 thread·사용자 표시, 시드 이슈는 "시드로 넣은 건이라 기록 없음".
   - 확인: `pytest -q tests/test_trace.py -k export` — `traces/issue_<no>.md` 생성, 이벤트 순서가 시각순
@@ -140,6 +140,7 @@ Claude Code로 구현하는 기준이다. 작업당 15~25분(작성 + 가짜 LLM
 - 2026-10-23 T02 완료: app/db.py(스키마·connect), app/seed.py(python -m app.seed, 재실행 시 초기화), tests/test_seed.py 25건 통과. 사용자 요청으로 ISSUE ID 칸 FOREIGN KEY·NOT NULL, SYSTEM 사용자 추가, 유효하지 않은 등록은 저장 안 함(seed.yaml·T09·T12·T14 반영)
 - 2026-10-23 묶음 1(T03~T08) 완료: app/llm.py(FallbackLLM·BedrockChatModel), app/fake_llm.py, app/classify.py, app/tools.py·app/mcp_server.py, app/agent.py, app/main.py, 테스트 6개 파일. pytest 전체 53건 통과. 구현 시간은 약 15분으로 예상(약 3시간)보다 훨씬 짧았다. 남은 묶음의 예상은 그대로 두고 축소 판단은 하지 않는다. T08의 "손으로 1회 통과"는 사용자 확인으로 남겼다(서버 기동·health 응답과 AppTest 경로는 확인함). 결정 사항은 REPORT_묶음1.md
 - 2026-10-23 T09 완료: OWNER_MST·RESOLUTION_LOG(트리거로 append-only)·PROCESS_LOG·CALL_LOG·MESSAGE_LOG, 시드 이슈 9건(#1 완료·#2~4 처리대기·#5~6 확인필요·#7 이관·#8~9 반려, 새 이슈는 #10부터). SERVICE.md가 아직 없어 시드 문의 문구·대상 값은 app/seed.py에서 정했다(REPORT_묶음2.md)
+- 2026-10-23 T10 완료: app/recorder.py(start_run·Run, 이벤트마다 새 연결로 바로 커밋), 분류(문의 등록·다시 분류 실행)와 비서(대화 입력 실행: llm·branch·tool·finalize, MESSAGE_LOG)에 연결. 비서의 모든 모델 실패가 ExceptionGroup으로 감싸여 except LLMError에 안 잡히던 문제를 고쳤다. tests/test_trace.py -k record 11건
 
 ## 실제 Bedrock 점검 목록
 
