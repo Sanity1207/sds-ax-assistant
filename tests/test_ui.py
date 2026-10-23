@@ -45,14 +45,17 @@ def test_skeleton_investigate_shows_answer(db_path):
     # 열린 이슈의 새 thread: 비서가 LLM 없이 첫 질문을 한다.
     assert chat_texts(at, "assistant") == [f"이슈 #{NEW_NO} 건에 대해 조사를 진행하시겠습니까? (y/n)"]
 
-    at.chat_input[0].set_value(" Y ").run()  # 데모 가짜 LLM은 get_issue를 부른 뒤 결과를 답한다
+    at.chat_input[0].set_value(" Y ").run()  # 데모 가짜 LLM은 get_issue → propose_resolution 순서로 부른다
     assert not at.exception
     texts = " ".join(chat_texts(at, "assistant"))
     assert "V003" in texts and "혼합탱크 1" in texts
+    assert [s.value for s in at.subheader] == ["승인 카드"]
 
+    # 승인 카드가 떠 있는 동안 대화창 입력은 승인 응답으로 판정한다(y/n/e가 아니면 다시 묻기).
     at.chat_input[0].set_value("V001도 찾아 줘").run()
     assert not at.exception
-    assert len(chat_texts(at, "user")) == 2
+    assert at.warning[0].value.startswith("y, n, e 중 하나로만 답해 주세요.")
+    assert len(chat_texts(at, "user")) == 1
 
 
 def chat_texts(at, name):
@@ -336,3 +339,86 @@ def test_failure_banner_and_retry(db_path, monkeypatch):
     assert len(at.error) == 0
     assert "V003" in " ".join(chat_texts(at, "assistant"))
     assert chat_texts(at, "user") == ["혼합탱크 ID 알려 줘"]  # 관리자 재입력 없음
+
+
+# ---- T29: 승인 카드·편집 폼 화면 ----
+
+def to_card(at, issue_no):
+    """이슈대장 → [이 건 조사] → 첫 질문 y → 데모 가짜 LLM이 처리안을 만들어 승인 카드가 뜬다."""
+    at.sidebar.radio(key="page").set_value("이슈대장").run()
+    at.button(key=f"investigate_{issue_no}").click().run()
+    at.chat_input[0].set_value("y").run()
+    assert not at.exception
+    assert [s.value for s in at.subheader] == ["승인 카드"]
+    return at
+
+
+def issue_row(issue_no):
+    return connect().execute("SELECT * FROM ISSUE WHERE ISSUE_NO = ?", (issue_no,)).fetchone()
+
+
+def test_approval_card_y_completes_issue(db_path):
+    at = to_card(open_app(), 2)
+    card = " ".join(m.value for m in at.markdown)
+    assert "반영 전: V003→104 없음" in card and "반영 후: V003→104 냉각 · 미수행 N(새 행)" in card
+    assert "문의 원문: 혼합탱크 1(V003)에 냉각(104) 공정을 추가해 주세요." in card
+    assert at.info[0].value.startswith("위험 등급: write · 도구: propose_resolution")
+    at.button(key="approve_y").click().run()
+    assert not at.exception
+    assert not at.subheader  # 카드가 사라진다
+    assert "반영 완료: [매핑 변경] V003→104 생성, #2 완료" in chat_texts(at, "assistant")
+    assert issue_row(2)["STATUS"] == "완료"
+    assert at.caption[0].value.startswith("이슈 #2 · V003 / 104 · 완료")
+    at.sidebar.radio(key="page").set_value("이슈대장").run()
+    table = at.dataframe[0].value
+    assert table[table["번호"] == 2]["처리상태"].iloc[0] == "완료"
+
+
+def test_approval_card_n_cancels(db_path):
+    at = to_card(open_app(), 2)
+    at.button(key="approve_n").click().run()
+    assert "처리안 취소됨" in chat_texts(at, "assistant") and issue_row(2)["STATUS"] == "처리대기"
+    assert not at.subheader
+
+
+def test_approval_destructive_double_confirm(db_path):
+    at = to_card(open_app(), 4)
+    assert at.error[0].value.startswith("위험 등급: destructive")
+    at.button(key="approve_y").click().run()
+    assert issue_row(4)["STATUS"] == "처리대기"  # y만으로는 실행하지 않는다
+    at.text_input(key="confirm_no").input("5")
+    at.button[[b.label for b in at.button].index("이중 확인")].click().run()
+    assert not at.exception
+    assert at.warning[0].value.startswith("이슈 번호가 맞지 않아 실행하지 않았습니다.")
+    assert issue_row(4)["STATUS"] == "처리대기"
+    at.text_input(key="confirm_no").input("4")
+    at.button[[b.label for b in at.button].index("이중 확인")].click().run()
+    assert issue_row(4)["STATUS"] == "완료"
+    assert "반영 완료: [매핑 변경] V004→105 삭제, #4 완료" in chat_texts(at, "assistant")
+
+
+def test_approval_edit_form(db_path):
+    at = to_card(open_app(), 3)  # 데모 처리안: V003 103 → 105 교체
+    at.button(key="approve_e").click().run()
+    assert "처리안을 직접 편집해 주세요." in chat_texts(at, "assistant")
+    assert at.selectbox(key="edit_kind").value == "update" and at.selectbox(key="edit_new_action").value == "105"
+    # 위반 편집: 매핑을 바꾸면서 반려 → 거부, 편집 폼 그대로
+    at.selectbox(key="edit_status").set_value("반려")
+    at.button[[b.label for b in at.button].index("편집 완료")].click().run()
+    assert at.warning[0].value.startswith("편집한 처리안이 검사에서 거부됐습니다")
+    assert at.selectbox(key="edit_kind")
+    # 정상 편집: 냉각(104)으로 교체 → 새 카드 → 승인
+    at.selectbox(key="edit_status").set_value("완료")
+    at.selectbox(key="edit_new_action").set_value("104")
+    at.text_area(key="edit_result").input("냉각으로 교체")
+    at.button[[b.label for b in at.button].index("편집 완료")].click().run()
+    assert "반영 후: V003→103 없음; V003→104 냉각 · 미수행 N(새 행)" in " ".join(m.value for m in at.markdown)
+    at.button(key="approve_y").click().run()
+    assert issue_row(3)["STATUS"] == "완료"
+    assert issue_row(3)["RESULT"] == "[매핑 변경] V003→103 삭제, V003→104 생성 냉각으로 교체"
+
+
+def test_approval_typed_answers_work(db_path):
+    at = to_card(open_app(), 2)
+    at.chat_input[0].set_value(" Y ").run()
+    assert issue_row(2)["STATUS"] == "완료"

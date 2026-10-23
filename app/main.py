@@ -19,8 +19,10 @@ from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ct
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage  # noqa: E402
 
 from app import config  # noqa: E402
-from app.agent import (MODE_NAMES, REQUEST_TAG, McpUnavailable, free_thread_id, issue_mode,  # noqa: E402
-                       issue_thread_id, load_messages, needs_retry, open_thread, retry_turn, run_turn)
+from app.agent import (CARD_QUESTION, CONFIRM_QUESTION, MODE_NAMES, REQUEST_TAG, McpUnavailable,  # noqa: E402
+                       answer_approval, free_thread_id, issue_mode, issue_thread_id, load_messages, needs_retry,
+                       open_thread, pending_approval, retry_turn, run_turn)
+from app.resolution import CLOSED_TARGETS  # noqa: E402
 from app.auth import DEFAULT_USER, PermissionDenied, can, get_user, selectable_users  # noqa: E402
 from app.classify import (FAILED_RESULT, ReclassifyNotAllowed, RegistrationRejected, can_reclassify,  # noqa: E402
                           classify_issue, register_issue)
@@ -198,7 +200,7 @@ def show_message(message) -> None:
             st.chat_message("assistant").write(message.content)
 
 
-def work(call) -> None:
+def work(call):
     """비서 작업 1회(대화 입력·다시 시도). 진행 상황(예: '도구 호출 중: get_vessel_mappings(V003) (3/8)')을 보여 준다.
 
     모든 모델 실패·MCP 연결 실패는 여기서 삼키고, 화면이 thread 상태를 보고 오류 배너와 [다시 시도]를 띄운다.
@@ -214,16 +216,102 @@ def work(call) -> None:
             status.update(label=message)
 
         try:
-            asyncio.run(call(progress))
+            result = asyncio.run(call(progress))
         except (LLMError, McpUnavailable) as e:
             st.session_state.last_failure = str(e)
             status.update(label="응답 실패", state="error", expanded=False)
-            return
+            return None
         status.update(label="완료", state="complete", expanded=False)
+    if result is not None and result.note:
+        st.session_state.approval_note = result.note  # 다시 묻기 안내는 승인 카드 위에 보여 준다
+    return result
 
 
 def send(thread_id: str, text: str) -> None:
     work(lambda progress: run_turn(thread_id, text, progress=progress))
+    st.rerun()  # 이슈 상태·승인 카드를 새 값으로 다시 그린다
+
+
+def respond(thread_id: str, text: str | None = None, edited: dict | None = None) -> None:
+    """승인 카드 버튼·이중 확인·편집 폼 → 승인 응답 1회(Python 판정)."""
+    work(lambda progress: answer_approval(thread_id, text, edited=edited))
+    st.rerun()
+
+
+def show_approval(thread_id: str, pending: dict) -> None:
+    """승인 카드: 위험 등급·도구·대상 전후 값·EXECUTED_YN·근거(이슈 번호·문의 원문). 값은 Python이 DB에서 읽은 원본."""
+    card, proposal, stage = pending["card"], pending["proposal"], pending["stage"]
+    with st.container(border=True):
+        st.subheader("승인 카드")
+        if note := st.session_state.pop("approval_note", None):
+            st.warning(note)
+        destructive = card["risk"] == "destructive"
+        (st.error if destructive else st.info)(
+            f"위험 등급: {card['risk']} · 도구: {card['tool']}"
+            + (" · 수행된 매핑을 바꿉니다. 승인 뒤 이슈 번호를 한 번 더 입력해야 실행됩니다." if destructive else ""))
+        st.markdown("\n".join([
+            f"- 근거: 이슈 #{card['issue_no']} ({card['issue_status']} → {card['new_status']}) · 요청자 {card['requester_id']}",
+            f"- 입력칸: {card['input_fields']}",
+            f"- 문의 원문: {card['inquiry']}",
+            f"- 대상: {card['change']}",
+            f"- 반영 전: {'; '.join(card['before'])}",
+            f"- 반영 후: {'; '.join(card['after'])}",
+            f"- 현재 수행 상태(EXECUTED_YN): {card['executed_yn']}",
+            f"- 처리결과(반영될 문장): {card['result']}",
+        ]))
+        if stage == "card":
+            st.caption(CARD_QUESTION + " (대화창에 y/n/e를 입력해도 됩니다)")
+            c1, c2, c3 = st.columns(3)
+            if c1.button("승인", key="approve_y", type="primary"):
+                respond(thread_id, "y")
+            if c2.button("취소", key="approve_n"):
+                respond(thread_id, "n")
+            if c3.button("직접 편집", key="approve_e"):
+                respond(thread_id, "e")
+        elif stage == "confirm":
+            st.warning(CONFIRM_QUESTION.format(n=proposal["issue_no"]))
+            with st.form("confirm_form", clear_on_submit=True):
+                value = st.text_input("이슈 번호", key="confirm_no")
+                confirmed = st.form_submit_button("이중 확인")
+            if confirmed:
+                respond(thread_id, value)
+            if st.button("취소", key="confirm_cancel"):
+                respond(thread_id, "n")
+        else:
+            show_edit_form(thread_id, proposal)
+
+
+EDIT_KINDS = {"none": "매핑 변경 없음", "create": "생성", "update": "수정(ACTION 교체)", "delete": "삭제"}
+
+
+def show_edit_form(thread_id: str, proposal: dict) -> None:
+    """처리안 편집 폼: 변경 종류·VESSEL·ACTION·바꿀 ACTION은 마스터 목록에서, 새 상태는 허용 값에서, 설명은 자유 텍스트."""
+    issue = query("SELECT * FROM ISSUE WHERE ISSUE_NO = ?", (proposal["issue_no"],))[0]
+    vessels = {r["VESSEL_ID"]: r["VESSEL_NAME"] for r in query("SELECT * FROM VESSEL_MST ORDER BY VESSEL_ID")}
+    actions = {r["ACTION_SEQ"]: r["ACTION_DESCRIPTION"] for r in query("SELECT * FROM ACTION_MST ORDER BY ACTION_SEQ")}
+    change = proposal["mapping_change"] or {}
+    kinds, v_list, a_list = list(EDIT_KINDS), list(vessels), list(actions)
+    statuses = list(CLOSED_TARGETS)
+    with st.form("edit_form"):
+        kind = st.selectbox("매핑 변경 종류", kinds, index=kinds.index(change.get("kind", "none")),
+                            format_func=EDIT_KINDS.get, key="edit_kind")
+        vessel = st.selectbox("VESSEL", v_list, index=v_list.index(change.get("vessel_id", issue["VESSEL_ID"])),
+                              format_func=lambda v: f"{v} {vessels[v]}", key="edit_vessel")
+        action = st.selectbox("ACTION(대상, 수정이면 바꾸기 전)", a_list,
+                              index=a_list.index(change.get("action_seq", issue["ACTION_SEQ"])),
+                              format_func=lambda a: f"{a} {actions[a]}", key="edit_action")
+        target = st.selectbox("바꿀 ACTION(수정일 때만)", a_list,
+                              index=a_list.index(change.get("new_action_seq") or a_list[0]),
+                              format_func=lambda a: f"{a} {actions[a]}", key="edit_new_action")
+        status = st.selectbox("새 상태", statuses, index=statuses.index(proposal["new_status"]), key="edit_status")
+        result = st.text_area("처리결과 설명", value=proposal["result"], key="edit_result")
+        submitted = st.form_submit_button("편집 완료")
+    if submitted:
+        mapping = None if kind == "none" else {"kind": kind, "vessel_id": vessel, "action_seq": action,
+                                               **({"new_action_seq": target} if kind == "update" else {})}
+        respond(thread_id, edited={"mapping_change": mapping, "new_status": status, "result": result})
+    if st.button("편집 취소", key="edit_cancel"):
+        respond(thread_id, "n")
 
 
 def retry(thread_id: str) -> None:
@@ -270,6 +358,8 @@ def page_assistant() -> None:
         show_message(message)
     if asyncio.run(needs_retry(thread_id)):
         show_failure_banner(thread_id)
+    if (pending := asyncio.run(pending_approval(thread_id))) is not None:
+        show_approval(thread_id, pending)
 
 
 def main() -> None:

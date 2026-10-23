@@ -89,7 +89,7 @@
   - 확인: `pytest -q tests/test_approval.py -k "cancel or double"` — n 후 VESSEL_ACTION·ISSUE 변화 0, 틀린 번호로는 반영 0
 - [x] **T28 e 직접 편집** — 정해진 문장 응답(LLM 미호출), 편집 값(변경 종류·VESSEL·ACTION·새 상태·설명)을 Python이 재검사·위험 등급 재계산 → 새 카드. 편집 중·완료 후 n이면 취소.
   - 확인: `pytest -q tests/test_approval.py -k edit` — 편집 후 위반 값 거부, 정상 편집 → 새 카드 → y 반영
-- [ ] **T29 승인 카드·편집 폼 화면 연결** — Streamlit에 카드 버튼([승인]/[취소]/[직접 편집]), 이중 확인 입력, 편집 폼(마스터·허용 상태 선택).
+- [x] **T29 승인 카드·편집 폼 화면 연결** — Streamlit에 카드 버튼([승인]/[취소]/[직접 편집]), 이중 확인 입력, 편집 폼(마스터·허용 상태 선택).
   - 확인: `pytest -q tests/test_approval.py` 전체 + `pytest -q tests/test_ui.py -k approval`(AppTest로 카드 → y → 이슈 완료 표시)
 
 ## 묶음 6 · ③ 값 이상 조사 (시간 부족 시 먼저 축소)
@@ -163,6 +163,8 @@ Claude Code로 구현하는 기준이다. 작업당 15~25분(작성 + 가짜 LLM
 - 2026-10-23 T26 완료: y → RESOLUTION_LOG '승인' → execute_proposal(BEGIN IMMEDIATE, revalidate = 처리안 검사 전체 재실행 + EXECUTED_YN·이슈 상태·위험 등급 비교, 매핑·ISSUE·'실행 성공' 한 트랜잭션, 수정 = 삭제 후 생성 N·NULL). 반영 후 정해진 문장(LLM 미호출). 실패 시 전체 롤백 + '실행 실패(사유)' 별도 기록, commit 이벤트, finalize(LLM 설명 후 멈춤, 실패 시 Python 문장). tests/test_approval.py -k execute 9건
 - 2026-10-23 T27 완료: n → RESOLUTION_LOG '취소'·approval 이벤트, 대화 맥락엔 '처리안 취소됨'만, 업무 데이터 변화 0. destructive는 y 뒤 confirm 단계(이슈 번호 정확히 일치해야 실행, 틀리면 횟수 제한 없이 다시 묻기, n이면 취소). tests/test_approval.py -k 'cancel or double' 6건
 - 2026-10-23 T28 완료: e → '처리안을 직접 편집해 주세요'(LLM 미호출), edit 단계는 편집 폼 제출(edited) 또는 n만, 편집 값은 check_proposal로 재검사·위험 등급 재계산 → RESOLUTION_LOG '직접 편집'(전후) → 새 카드. 반영 시 대화 맥락 '관리자가 처리안을 직접 수정해 승인함. 반영 완료: …'. tests/test_approval.py -k edit 10건
+- 2026-10-23 T29 완료: 조사 비서 화면에 승인 카드(위험 등급 강조, 근거·전후 값·EXECUTED_YN·처리결과), [승인]/[취소]/[직접 편집], 이중 확인 입력 폼, 편집 폼(종류·VESSEL·ACTION·바꿀 ACTION은 마스터 목록, 새 상태는 완료·반려·거절, 설명). 다시 묻기 안내는 카드 위 경고. 대화창 y/n/e도 같은 뜻. 데모 가짜 LLM이 get_issue → propose_resolution으로 처리안을 만듦. tests/test_ui.py -k approval 5건
+- 2026-10-23 묶음 5(T24~T29) 완료: 결정 사항은 REPORT_묶음5.md
 
 ## 실제 Bedrock 점검 목록
 
@@ -176,4 +178,5 @@ Claude Code로 구현하는 기준이다. 작업당 15~25분(작성 + 가짜 LLM
 - [ ] 문의에 지시문이 섞인 건이 정상 분류되고 매핑 변화가 없는지 (T16)
 - [ ] 무관 주제 거절이 시스템 프롬프트만으로 되는지 (T21)
 - [ ] 멈춤 뒤 마무리 호출(도구 없이, 도구 결과를 글로 풀어 보냄)이 각 모델에서 오류 없이 되는지, '확인하지 못한 것'·'다음 질문 제안' 형식을 지키는지 (T22)
+- [ ] 각 모델이 propose_resolution의 mapping_change(객체 또는 null)를 스키마대로 채우는지, 처리안을 만든 뒤 '반영했다'고 말하지 않는지 (T24·T25)
 - [ ] 최종 평가 15건 (T36)

@@ -653,6 +653,7 @@ class TurnResult:
     tools: list[str] = field(default_factory=list)
     pending: dict | None = None  # 승인 대기 처리안(있으면 화면이 승인 카드를 띄운다)
     errors: list[str] = field(default_factory=list)  # 직접 편집 검사 오류
+    note: str = ""  # 고정 입력을 다시 물을 때의 안내(화면이 카드 위에 보여 준다)
 
 
 def _config(thread_id: str) -> dict:
@@ -837,7 +838,7 @@ async def answer_approval(thread_id: str, text: str | None = None, *, edited: di
             run.message("비서", retry_text)
             run.finish("다시 묻기")
             return TurnResult(retry_text, None, snapshot.values.get("messages", []), 0, llm_called=False, mode=mode,
-                              pending=pending, errors=errors)
+                              pending=pending, errors=errors, note=retry_text)
         answer["user_id"] = user_id
         async with open_checkpointer() as saver:
             graph = build_graph(llm or get_llm(), [], saver, run)

@@ -71,19 +71,55 @@ _VESSEL_ID = re.compile(r"\bV\d{3}\b", re.IGNORECASE)
 _ISSUE_NO = re.compile(r"#(\d+)")
 
 
+def demo_proposal(issue_text: str) -> dict | None:
+    """데모용: get_issue 결과 글에서 그럴듯한 처리안 인자를 만든다(실제 판단은 LLM이 할 일)."""
+    def find(pattern):
+        m = re.search(pattern, issue_text)
+        return m.group(1) if m else None
+
+    n, vessel, action, status = find(r"이슈 #(\d+)"), find(r"VESSEL_ID 칸: (\S+)"), find(r"ACTION_SEQ 칸: (\S+)"), \
+        find(r"처리상태: (\S+)")
+    inquiry = find(r"<<<(.*)>>>") or ""
+    if not (n and vessel and action and status):
+        return None
+    args = {"issue_no": int(n), "new_status": "완료", "mapping_change": None,
+            "result": "(가짜 LLM) 확인 결과 매핑을 바꿀 필요가 없다고 판단"}
+    if status == "처리대기":
+        if "매핑 없음" in issue_text:
+            change = {"kind": "create", "vessel_id": vessel, "action_seq": action}
+        elif "삭제" in inquiry or "빼" in inquiry:
+            change = {"kind": "delete", "vessel_id": vessel, "action_seq": action}
+        else:
+            targets = [x for x in re.findall(r"\((\d{3})\)", inquiry) if x != action]
+            if not targets:
+                return None
+            change = {"kind": "update", "vessel_id": vessel, "action_seq": action, "new_action_seq": targets[-1]}
+        args.update(mapping_change=change, result="(가짜 LLM) 문의 요청대로 매핑 변경")
+    elif status not in ("확인필요", "이관"):
+        return None
+    return args
+
+
 class DemoChatModel:
-    """앱 데모용 가짜 모델. 호출마다 입력을 보고 응답을 만든다."""
+    """앱 데모용 가짜 모델. 호출마다 입력을 보고 응답을 만든다.
+
+    조사 요청('처리안' 포함)이면 get_issue → propose_resolution 순서로 부르고, 그 밖에는 도구 하나를 부른 뒤 결과를 답한다.
+    """
 
     model_id = "fake-demo"
 
     def chat(self, messages, tools=None):
         last_human = max((i for i, m in enumerate(messages) if isinstance(m, HumanMessage)), default=-1)
         results = [m for m in messages[last_human + 1:] if isinstance(m, ToolMessage)]
-        if results:
-            body = "\n".join(str(m.content) for m in results)
-            return AIMessage(content=f"(가짜 LLM) 조사 결과입니다.\n{body}")
         names = {getattr(t, "name", None) for t in tools or []}
         text = str(messages[last_human].content) if last_human >= 0 else ""
+        if results:
+            last = results[-1]
+            if last.name == "get_issue" and "propose_resolution" in names and "처리안" in text:
+                if args := demo_proposal(str(last.content)):
+                    return tool_call("propose_resolution", args)
+            body = "\n".join(str(m.content) for m in results)
+            return AIMessage(content=f"(가짜 LLM) 조사 결과입니다.\n{body}")
         issue = _ISSUE_NO.search(text)
         if issue and "get_issue" in names:
             return tool_call("get_issue", {"issue_no": int(issue.group(1))})
