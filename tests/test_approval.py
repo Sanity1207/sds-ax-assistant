@@ -111,3 +111,139 @@ def test_propose_check_writes_nothing(db_path):
     after = (conn.execute("SELECT * FROM VESSEL_ACTION ORDER BY 1, 2").fetchall(),
              conn.execute("SELECT * FROM ISSUE ORDER BY 1").fetchall())
     assert [list(map(tuple, t)) for t in before] == [list(map(tuple, t)) for t in after]
+
+
+# ---- T25: interrupt 승인 카드 ----
+
+import asyncio  # noqa: E402
+import json  # noqa: E402
+
+from langchain_core.messages import AIMessage, ToolMessage  # noqa: E402
+
+from app.agent import (CARD_QUESTION, CARD_RETRY, answer_approval, issue_thread_id, pending_approval,  # noqa: E402
+                       run_turn)
+from app.auth import PermissionDenied  # noqa: E402
+from app.db import connect  # noqa: E402
+from app.fake_llm import FakeChatModel, fake_llm, tool_call  # noqa: E402
+
+
+def business(conn=None):
+    """업무 데이터(VESSEL_ACTION·ISSUE) 스냅숏."""
+    conn = conn or connect()
+    return ([tuple(r) for r in conn.execute("SELECT * FROM VESSEL_ACTION ORDER BY 1, 2")],
+            [tuple(r) for r in conn.execute("SELECT * FROM ISSUE ORDER BY 1")])
+
+
+def propose(issue, change, status="완료", result="요청대로 처리", user="A001", extra=()):
+    """가짜 LLM이 propose_resolution을 부르게 해 승인 카드에서 멈춘다."""
+    thread = issue_thread_id(issue, user)
+    args = {"issue_no": issue, "new_status": status, "result": result, "mapping_change": change}
+    model = FakeChatModel("f", [tool_call("propose_resolution", args, "p1"), *extra])
+    turn = asyncio.run(run_turn(thread, "처리안 만들어 줘", fake_llm(model)))
+    return thread, turn, model
+
+
+def test_card_interrupts_with_db_values(db_path):
+    before = business()
+    thread, turn, model = propose(2, CREATE_2, result="V003에 냉각 공정 연결")
+    assert turn.pending is not None and turn.pending["stage"] == "card"
+    card = turn.pending["card"]
+    issue = connect().execute("SELECT * FROM ISSUE WHERE ISSUE_NO = 2").fetchone()
+    assert card["inquiry"] == issue["INQUIRY"] and card["requester_id"] == issue["REQUESTER_ID"]
+    assert (card["risk"], card["tool"], card["issue_no"], card["issue_status"], card["new_status"]) == (
+        "write", "propose_resolution", 2, "처리대기", "완료")
+    assert card["before"] == ["V003→104 없음"] and card["after"] == ["V003→104 냉각 · 미수행 N(새 행)"]
+    assert card["executed_yn"] == "-" and card["change"] == "[매핑 변경] V003→104 생성"
+    assert card["result"] == "[매핑 변경] V003→104 생성 V003에 냉각 공정 연결"
+    assert turn.answer.startswith("[승인 카드] 위험 등급: write · 도구: propose_resolution")
+    assert turn.answer.endswith(CARD_QUESTION)
+    assert business() == before  # 승인 전에는 아무것도 바뀌지 않는다
+    assert len(model.calls) == 1  # 카드에서 멈춘 뒤 LLM을 더 부르지 않는다
+    tool_msg = [m for m in turn.messages if isinstance(m, ToolMessage)][-1]
+    assert tool_msg.content.startswith("처리안 검사 통과")
+
+
+def test_card_destructive_reads_executed_from_db(db_path):
+    _, turn, _ = propose(4, DELETE_4, result="배출 공정 중단")
+    card = turn.pending["card"]
+    mapping = connect().execute("SELECT * FROM VESSEL_ACTION WHERE VESSEL_ID = 'V004' AND ACTION_SEQ = '105'").fetchone()
+    assert card["risk"] == "destructive" and card["executed_yn"] == mapping["EXECUTED_YN"] == "Y"
+    assert card["before"] == [f"V004→105 배출 · 수행됨 Y({mapping['EXECUTED_AT']})"] and card["after"] == ["V004→105 없음"]
+
+
+def test_card_update_shows_both_rows(db_path):
+    _, turn, _ = propose(3, UPDATE_3)
+    card = turn.pending["card"]
+    assert card["before"] == ["V003→103 교반 · 미수행 N", "V003→105 없음"]
+    assert card["after"] == ["V003→103 없음", "V003→105 배출 · 미수행 N(새 행)"]
+    assert card["executed_yn"] == "N"
+
+
+def test_card_rejected_proposal_has_no_card(db_path):
+    other = {"issue_no": 3, "new_status": "완료", "result": "x", "mapping_change": UPDATE_3}
+    model = FakeChatModel("f", [tool_call("propose_resolution", other, "p1"), AIMessage("다른 이슈라 만들 수 없습니다.")])
+    turn = asyncio.run(run_turn(issue_thread_id(2, "A001"), "3번 처리안", fake_llm(model)))
+    assert turn.pending is None and turn.answer == "다른 이슈라 만들 수 없습니다."
+    tool_msg = [m for m in turn.messages if isinstance(m, ToolMessage)][-1]
+    assert tool_msg.content.startswith("[오류] 처리안 검사에서 거부했습니다: 처리안은 지금 화면의 이슈 #2에만")
+    assert asyncio.run(pending_approval(issue_thread_id(2, "A001"))) is None
+
+
+@pytest.mark.parametrize("text", ["ㅇㅇ", "네", "yes", "승인", "Y?", "", "yn", "okay"])
+def test_card_other_input_asks_again_without_llm(db_path, text):
+    thread, turn, model = propose(2, CREATE_2)
+    before = business()
+    calls = len(model.calls)
+    again = asyncio.run(answer_approval(thread, text, llm=fake_llm(model)))
+    assert again.answer == CARD_RETRY and not again.llm_called and again.pending["stage"] == "card"
+    assert len(model.calls) == calls  # LLM 호출 0
+    assert business() == before
+    # 대화창 입력으로 와도(run_turn) 승인 응답으로 판정해 비서에게 보내지 않는다.
+    via_chat = asyncio.run(run_turn(thread, text, fake_llm(model)))
+    assert via_chat.answer == CARD_RETRY and len(model.calls) == calls
+    runs = connect().execute("SELECT RUN_KIND, RESULT FROM PROCESS_LOG ORDER BY rowid").fetchall()
+    assert [tuple(r) for r in runs] == [("대화 입력", "승인 대기"), ("승인 응답", "다시 묻기"), ("승인 응답", "다시 묻기")]
+    event = connect().execute("SELECT NAME, SUCCESS FROM CALL_LOG WHERE EVENT_KIND = 'approval' ORDER BY rowid DESC").fetchone()
+    assert tuple(event) == ("다시 묻기", "N")
+
+
+def test_card_recorded_and_survives_reopen(db_path):
+    thread, turn, _ = propose(2, CREATE_2)
+    conn = connect()
+    run = conn.execute("SELECT * FROM PROCESS_LOG").fetchone()
+    assert (run["RUN_KIND"], run["RESULT"], run["TOOL_CALLS"]) == ("대화 입력", "승인 대기", 1)
+    events = conn.execute("SELECT EVENT_KIND, NAME, INPUT, OUTPUT FROM CALL_LOG WHERE RUN_ID = ? ORDER BY SEQ",
+                          (run["RUN_ID"],)).fetchall()
+    tool = next(e for e in events if e["EVENT_KIND"] == "tool")
+    assert json.loads(tool["INPUT"])["risk"] == "write" and json.loads(tool["INPUT"])["auto_run"] is False
+    card_event = next(e for e in events if e["EVENT_KIND"] == "approval")
+    assert card_event["NAME"] == "승인 카드" and json.loads(card_event["OUTPUT"]) == turn.pending["card"]
+    # 다시 열어도(새 체크포인터 연결) 승인 대기 처리안이 이어진다.
+    pending = asyncio.run(pending_approval(thread))
+    assert pending["card"] == turn.pending["card"]
+
+
+def test_card_destructive_tool_event_risk(db_path):
+    propose(4, DELETE_4)
+    tool = connect().execute("SELECT INPUT FROM CALL_LOG WHERE EVENT_KIND = 'tool'").fetchone()[0]
+    assert json.loads(tool)["risk"] == "destructive"
+
+
+@pytest.mark.parametrize("user_id", ["C001", "C005"])
+def test_card_answer_requires_admin(db_path, user_id):
+    thread, _, _ = propose(2, CREATE_2)
+    with pytest.raises(PermissionDenied):
+        asyncio.run(answer_approval(thread, "y", user_id=user_id))
+    assert asyncio.run(pending_approval(thread)) is not None
+
+
+def test_card_one_proposal_at_a_time(db_path):
+    calls = AIMessage("", tool_calls=[
+        {"name": "propose_resolution", "args": {"issue_no": 2, "new_status": "완료", "result": "a", "mapping_change": CREATE_2},
+         "id": "p1"},
+        {"name": "propose_resolution", "args": {"issue_no": 2, "new_status": "반려", "result": "b", "mapping_change": None},
+         "id": "p2"}])
+    turn = asyncio.run(run_turn(issue_thread_id(2, "A001"), "처리안", fake_llm(FakeChatModel("f", [calls]))))
+    assert turn.pending["proposal"]["new_status"] == "완료"
+    second = [m for m in turn.messages if isinstance(m, ToolMessage)][-1]
+    assert second.content.startswith("[오류] 한 번에 처리안 하나만")

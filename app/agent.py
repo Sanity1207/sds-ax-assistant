@@ -47,6 +47,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
+from langgraph.types import Command, interrupt
 
 from app import config
 from app.auth import require
@@ -56,6 +57,8 @@ from app.guard import run_guard
 from app.llm import FallbackLLM, LLMError, get_llm
 from app.mcp_server import server_command
 from app.recorder import Run, Timer, start_run
+from app.resolution import (build_card, card_text, check_proposal, done_text, execute_proposal, record, record_cancel,
+                            record_edit, summary)
 from app.tools import READ_TOOLS, TOOL_SPECS
 
 PROMPT_NAME = "assistant"
@@ -134,6 +137,7 @@ class AgentState(TypedDict, total=False):
     calls_seen: list[str]  # 이번 입력에서 부른 (도구, 인자) — 중복 호출 검사용
     fail_tool: str | None  # 바로 앞 도구 호출이 실패했으면 그 도구 이름
     fail_count: int  # fail_tool이 연속으로 실패한 횟수
+    pending: dict | None  # 승인 대기 처리안 {stage: card/confirm/edit, proposal, card, edited}
     issue_no: int | None  # 화면의 이슈(없으면 None)
     mode: str  # open / closed / none (대화 입력마다 Python이 정함)
     first_question: str  # pending(답 대기) / answered
@@ -272,6 +276,113 @@ def fallback_summary(messages: list[BaseMessage], reason: str) -> str:
             "다음 질문 제안: 확인할 VESSEL·ACTION이나 이슈 번호를 하나로 좁혀 다시 질문해 주세요.")
 
 
+# ---- 승인 게이트(묶음 5) ----
+# 승인 카드 응답은 Python이 판정하는 고정 입력이다(앞뒤 공백·대소문자 무시). 그 밖의 입력은 비서에게 보내지 않고 다시 묻는다.
+CARD_QUESTION = "승인하시겠습니까? y(승인) / n(취소) / e(직접 편집)"
+CARD_RETRY = "y, n, e 중 하나로만 답해 주세요. " + CARD_QUESTION
+CONFIRM_QUESTION = ("수행된 매핑(EXECUTED_YN=Y)을 바꾸는 destructive 처리안입니다. 실행하려면 이슈 번호 {n}을(를) 입력하세요. "
+                    "취소는 n.")
+CONFIRM_RETRY = "이슈 번호가 맞지 않아 실행하지 않았습니다. " + CONFIRM_QUESTION
+EDIT_REPLY = "처리안을 직접 편집해 주세요."
+EDIT_WAIT = "편집 폼에서 처리안을 고쳐 제출해 주세요. 편집을 그만두려면 n을 입력하세요."
+CANCELLED = "처리안 취소됨"
+EDITED_PREFIX = "관리자가 처리안을 직접 수정해 승인함. "
+
+
+def _stage_proposal(call: dict, text: str, state: dict, pending: dict | None) -> tuple[str, str, dict | None]:
+    """propose_resolution 결과(검사 통과)를 승인 대기로 올린다. (도구 결과 문장, 위험 등급, 승인 대기)를 돌려준다.
+
+    MCP 도구와 같은 검사 함수를 화면의 이슈로 다시 돌려 처리안을 만들고, 카드는 DB에서 직접 읽는다.
+    """
+    if pending is not None:
+        return ("[오류] 한 번에 처리안 하나만 승인 카드로 올릴 수 있습니다. 앞의 처리안부터 승인 결과를 기다리세요.",
+                TOOL_SPECS["propose_resolution"]["risk"], pending)
+    args = call.get("args") or {}
+    checked = check_proposal(args.get("issue_no"), args.get("mapping_change"), args.get("new_status"),
+                             args.get("result"), state.get("issue_no") if state.get("mode") == "open" else None)
+    if not checked.ok:
+        return checked.error_text(args), TOOL_SPECS["propose_resolution"]["risk"], None
+    proposal = checked.proposal
+    staged = {"stage": "card", "proposal": proposal, "card": build_card(proposal), "edited": False}
+    return text, proposal["risk"], staged
+
+
+def prompt_for(pending: dict) -> str:
+    """승인 대기 단계마다 관리자에게 묻는 문장."""
+    n = pending["proposal"]["issue_no"]
+    if pending["stage"] == "confirm":
+        return CONFIRM_QUESTION.format(n=n)
+    if pending["stage"] == "edit":
+        return EDIT_WAIT
+    return card_text(pending["card"]) + "\n" + CARD_QUESTION
+
+
+def judge_approval(pending: dict, text: str | None, edited: dict | None) -> tuple[dict | None, str, list[str]]:
+    """승인 대기 단계별 입력 판정(Python). (재개할 응답 또는 None, 다시 묻는 문장, 편집 검사 오류)를 돌려준다."""
+    stage, n = pending["stage"], pending["proposal"]["issue_no"]
+    value = (text or "").strip()
+    if stage == "card":
+        if value.lower() in ("y", "n", "e"):
+            return {"decision": value.lower()}, "", []
+        return None, CARD_RETRY, []
+    if stage == "confirm":
+        if value.lower() == "n":
+            return {"decision": "n"}, "", []
+        if value == str(n):  # 이슈 번호 정확히 일치
+            return {"decision": "confirm"}, "", []
+        return None, CONFIRM_RETRY.format(n=n), []
+    # edit
+    if edited is not None:
+        checked = check_proposal(n, edited.get("mapping_change"), edited.get("new_status"), edited.get("result"), n)
+        if checked.ok:
+            return {"decision": "edited", "proposal": checked.proposal}, "", []
+        return None, "편집한 처리안이 검사에서 거부됐습니다. 고쳐서 다시 제출해 주세요: " + " / ".join(checked.errors), \
+            checked.errors
+    if value.lower() == "n":
+        return {"decision": "n"}, "", []
+    return None, EDIT_WAIT, []
+
+
+def _approve(pending: dict, stage: str, proposal: dict, answer: dict, run: Run | None) -> dict:
+    """승인 게이트 재개 뒤의 처리(재개마다 한 번만 실행된다)."""
+    decision, user_id = answer["decision"], answer["user_id"]
+
+    def event(name: str, output, **kw):
+        if run:
+            run.event("approval", name, {"stage": stage, "decision": decision, "card": pending["card"]}, output, **kw)
+
+    if decision == "n":
+        record_cancel(proposal, user_id)
+        event("취소", "취소: 업무 데이터 변경 없음")
+        return {"pending": None, "stop_reason": "", "messages": [AIMessage(CANCELLED)]}
+    if stage == "card" and decision == "e":
+        event("직접 편집 시작", EDIT_REPLY)
+        return {"pending": {**pending, "stage": "edit"}, "messages": [AIMessage(EDIT_REPLY)]}
+    if stage == "edit":
+        new = answer["proposal"]
+        record_edit(proposal, new, user_id)
+        card = build_card(new)
+        if run:
+            run.event("approval", "직접 편집", {"before": proposal, "after": new}, card_text(card))
+        return {"pending": {"stage": "card", "proposal": new, "card": card, "edited": True}}
+    if stage == "card" and decision == "y" and proposal["risk"] == "destructive":
+        event("승인(y) · 이중 확인 대기", CONFIRM_QUESTION.format(n=proposal["issue_no"]))
+        return {"pending": {**pending, "stage": "confirm"}}
+    # 실행: write는 y, destructive는 이슈 번호 이중 확인까지 통과
+    record(proposal["issue_no"], "승인", f"승인: {summary(proposal)}", proposal, user_id)
+    event("승인", {"double_confirm": "통과" if stage == "confirm" else "해당 없음"})
+    outcome = execute_proposal(proposal, user_id)
+    if run:
+        # 커밋·롤백이 끝난 뒤에 기록한다(SQLite 쓰기 잠금 규칙).
+        run.event("commit", "처리안 반영", {"proposal": proposal, "revalidation": outcome.revalidation or "통과"},
+                  "커밋" if outcome.ok else f"롤백: {outcome.message}", success=outcome.ok,
+                  error=None if outcome.ok else outcome.message)
+    if outcome.ok:
+        text = (EDITED_PREFIX if pending.get("edited") else "") + outcome.message
+        return {"pending": None, "stop_reason": "", "messages": [AIMessage(text)]}
+    return {"pending": None, "stop_reason": f"실행 실패: {outcome.message}"}
+
+
 def build_graph(llm: FallbackLLM | None, tools: list, checkpointer: BaseCheckpointSaver | None = None,
                 run: Run | None = None, progress: Callable[[str], None] | None = None, *,
                 connection: dict | None = None):
@@ -317,6 +428,7 @@ def build_graph(llm: FallbackLLM | None, tools: list, checkpointer: BaseCheckpoi
         used = state.get("tool_calls_used", 0)
         seen = list(state.get("calls_seen") or [])
         fail_tool, fail_count = state.get("fail_tool"), state.get("fail_count", 0)
+        pending = state.get("pending")
         stop = ""
         for call in last.tool_calls:
             if stop or used >= TOOL_BUDGET:
@@ -342,12 +454,15 @@ def build_graph(llm: FallbackLLM | None, tools: list, checkpointer: BaseCheckpoi
                 status = message.status
                 if status == "error" and not text.startswith("[오류]"):
                     text = f"[오류] {text}"
+            # 미등록 도구는 승인 필요로 본다(fail-safe). read·log는 승인 없이 자동 실행한다.
+            risk = TOOL_SPECS.get(call["name"], {}).get("risk", "미등록(승인 필요)")
+            if call["name"] == "propose_resolution" and not text.startswith("[오류]"):
+                # 쓰기: MCP 도구는 검사만 했다. Python이 같은 검사로 처리안·위험 등급을 정하고 승인 카드로 멈춘다.
+                text, risk, pending = _stage_proposal(call, text, state, pending)
             failed = text.startswith("[오류]")
-            out.append(ToolMessage(text, tool_call_id=call["id"], name=call["name"], status=status))
+            out.append(ToolMessage(text, tool_call_id=call["id"], name=call["name"], status="error" if failed else status))
             seen.append(call_key(call))
             if run:
-                # 미등록 도구는 승인 필요로 본다(fail-safe). read·log는 승인 없이 자동 실행한다.
-                risk = TOOL_SPECS.get(call["name"], {}).get("risk", "미등록(승인 필요)")
                 run.event("tool", call["name"], {"args": call["args"], "risk": risk, "auto_run": risk in ("read", "log")},
                           text, success=not failed, elapsed_ms=timer.ms)
             # 같은 도구가 연속으로 실패한 횟수(다른 도구를 부르거나 성공하면 처음부터 센다)
@@ -361,7 +476,7 @@ def build_graph(llm: FallbackLLM | None, tools: list, checkpointer: BaseCheckpoi
         if not stop and used >= TOOL_BUDGET:
             stop = f"도구 호출 상한({TOOL_BUDGET}회) 도달"
         return {"messages": out, "tool_calls_used": used, "calls_seen": seen, "fail_tool": fail_tool,
-                "fail_count": fail_count, "stop_reason": stop}
+                "fail_count": fail_count, "stop_reason": "" if pending else stop, "pending": pending}
 
     def should_stop(state: AgentState) -> str:
         last = state["messages"][-1]
@@ -375,6 +490,10 @@ def build_graph(llm: FallbackLLM | None, tools: list, checkpointer: BaseCheckpoi
         return route
 
     def after_tools(state: AgentState) -> str:
+        if state.get("pending"):
+            if run:
+                run.event("branch", "after_tools", {"pending": state["pending"]["proposal"]}, "approval")
+            return "approval"
         route = "finalize" if state.get("stop_reason") else "agent"
         if route == "finalize" and run:
             run.event("branch", "after_tools", {"tool_calls_used": state.get("tool_calls_used", 0),
@@ -408,13 +527,31 @@ def build_graph(llm: FallbackLLM | None, tools: list, checkpointer: BaseCheckpoi
             run.event("finalize", "finalize", {"stop_reason": reason}, header)
         return {"messages": out + [AIMessage(f"{header}\n\n{body}")], "model_id": model_id}
 
+    def approval(state: AgentState) -> dict:
+        """승인 게이트. interrupt로 멈추고, Python이 미리 판정한 응답(y/n/e, 이중 확인, 편집한 처리안)으로 재개한다.
+
+        interrupt 앞에는 부수 효과를 두지 않는다(재개할 때 노드를 처음부터 다시 돌리기 때문).
+        """
+        pending = dict(state["pending"])
+        stage, proposal = pending["stage"], pending["proposal"]
+        answer = interrupt({"stage": stage, "card": pending["card"], "issue_no": proposal["issue_no"],
+                            "risk": proposal["risk"]})
+        return _approve(pending, stage, proposal, answer, run)
+
+    def after_approval(state: AgentState) -> str:
+        if state.get("pending"):
+            return "approval"
+        return "finalize" if state.get("stop_reason") else END
+
     graph = StateGraph(AgentState)
     graph.add_node("agent", agent)
     graph.add_node("tools", run_tools)
+    graph.add_node("approval", approval)
     graph.add_node("finalize", finalize)
     graph.add_edge(START, "agent")
     graph.add_conditional_edges("agent", should_stop, {"tools": "tools", "finalize": "finalize"})
-    graph.add_conditional_edges("tools", after_tools, {"agent": "agent", "finalize": "finalize"})
+    graph.add_conditional_edges("tools", after_tools, {"agent": "agent", "finalize": "finalize", "approval": "approval"})
+    graph.add_conditional_edges("approval", after_approval, {"approval": "approval", "finalize": "finalize", END: END})
     graph.add_edge("finalize", END)
     return graph.compile(checkpointer=checkpointer)
 
@@ -511,6 +648,8 @@ class TurnResult:
     llm_called: bool = True
     mode: str = "none"
     tools: list[str] = field(default_factory=list)
+    pending: dict | None = None  # 승인 대기 처리안(있으면 화면이 승인 카드를 띄운다)
+    errors: list[str] = field(default_factory=list)  # 직접 편집 검사 오류
 
 
 def _config(thread_id: str) -> dict:
@@ -558,6 +697,9 @@ async def run_turn(thread_id: str, text: str, llm: FallbackLLM | None = None, *,
     """
     user_id, issue_no = _resolve(thread_id, user_id, issue_no)
     require(user_id, "investigate")  # 조사 비서는 관리자만(화면 제한과 별개로 다시 확인)
+    if await pending_approval(thread_id) is not None:
+        # 승인 카드가 떠 있으면 입력은 승인 응답이다(y/n/e만, 비서에게 보내지 않음).
+        return await answer_approval(thread_id, text, llm=llm, user_id=user_id, issue_no=issue_no)
     with start_run("대화 입력", user_id, issue_no, thread_id) as run:
         run.message("관리자", text)
         mode = issue_mode(issue_no)
@@ -621,13 +763,7 @@ async def _run_graph(thread_id: str, graph_input: dict | None, llm: FallbackLLM,
             run.finish("MCP 연결 실패")
             raise McpUnavailable(f"MCP 서버에 연결하지 못했습니다: {_describe_error(inner)}") from None
         raise
-    last = state["messages"][-1]
-    answer = _text(last.content)
-    run.message("비서", answer)
-    run.finish("멈춤" if state.get("stop_reason") else "답변 완료", model_id=state.get("model_id"),
-               tool_calls=state.get("tool_calls_used", 0), stop_reason=state.get("stop_reason") or None)
-    return TurnResult(answer, state.get("model_id"), state["messages"], state.get("tool_calls_used", 0),
-                      mode=mode, tools=[t.name for t in tools])
+    return _turn_result(state, run, mode, tools)
 
 
 def pending_kind(snapshot) -> str | None:
@@ -660,6 +796,68 @@ async def _abandon_failed(saver, thread_id: str, run: Run) -> None:
     closing.append(AIMessage(ABANDONED_REPLY))
     await graph.aupdate_state(_config(thread_id), {"messages": closing, "stop_reason": ""}, as_node="finalize")
     run.event("branch", "멈춘 작업 닫기", {"next": list(snapshot.next)}, "새 입력으로 진행")
+
+
+class NoPendingApproval(Exception):
+    """승인을 기다리는 처리안이 없다."""
+
+
+async def pending_approval(thread_id: str) -> dict | None:
+    """화면용: 이 thread에서 승인을 기다리는 처리안(stage·proposal·card). 없으면 None."""
+    async with open_checkpointer() as saver:
+        snapshot = await build_graph(None, [], saver).aget_state(_config(thread_id))
+    return snapshot.values.get("pending") if pending_kind(snapshot) == "approval" else None
+
+
+async def answer_approval(thread_id: str, text: str | None = None, *, edited: dict | None = None,
+                          llm: FallbackLLM | None = None, user_id: str | None = None,
+                          issue_no: int | None = None) -> TurnResult:
+    """승인 카드 응답 1회(실행 종류 '승인 응답'). 입력은 Python이 판정한다.
+
+    카드: y(승인)·n(취소)·e(직접 편집)만, 이중 확인: 이슈 번호 정확히 일치 또는 n, 편집: 편집 폼 제출(edited) 또는 n.
+    그 밖의 입력은 그래프를 재개하지 않고(LLM 호출 없음) 다시 묻는다.
+    """
+    user_id, issue_no = _resolve(thread_id, user_id, issue_no)
+    require(user_id, "approve")  # 승인은 관리자만(화면 제한과 별개로 다시 확인)
+    async with open_checkpointer() as saver:
+        snapshot = await build_graph(None, [], saver).aget_state(_config(thread_id))
+    if pending_kind(snapshot) != "approval":
+        raise NoPendingApproval(f"thread '{thread_id}'에는 승인을 기다리는 처리안이 없습니다.")
+    pending = snapshot.values["pending"]
+    mode = snapshot.values.get("mode", "open")
+    with start_run("승인 응답", user_id, issue_no, thread_id) as run:
+        run.message("관리자", text if edited is None else "(편집 폼 제출) " + json.dumps(edited, ensure_ascii=False))
+        answer, retry_text, errors = judge_approval(pending, text, edited)
+        if answer is None:
+            run.event("approval", "다시 묻기", {"stage": pending["stage"], "input": text, "edited": edited}, retry_text,
+                      success=False)
+            run.message("비서", retry_text)
+            run.finish("다시 묻기")
+            return TurnResult(retry_text, None, snapshot.values.get("messages", []), 0, llm_called=False, mode=mode,
+                              pending=pending, errors=errors)
+        answer["user_id"] = user_id
+        async with open_checkpointer() as saver:
+            graph = build_graph(llm or get_llm(), [], saver, run)
+            state = await graph.ainvoke(Command(resume=answer), _config(thread_id))
+        return _turn_result(state, run, mode, [])
+
+
+def _turn_result(state: dict, run: Run, mode: str, tools: list) -> TurnResult:
+    """그래프 실행 결과를 정리하고 실행 결과를 기록한다. 승인 대기로 멈췄으면 카드·질문을 답으로 돌려준다."""
+    pending = state.get("pending") if state.get("__interrupt__") else None
+    if pending is not None:
+        answer = prompt_for(pending)
+        if pending["stage"] == "card" and run:
+            run.event("approval", "승인 카드", pending["proposal"], pending["card"])
+        run.message("비서", answer)
+        run.finish("승인 대기", model_id=state.get("model_id"), tool_calls=state.get("tool_calls_used", 0))
+    else:
+        answer = _text(state["messages"][-1].content)
+        run.message("비서", answer)
+        run.finish("멈춤" if state.get("stop_reason") else "답변 완료", model_id=state.get("model_id"),
+                   tool_calls=state.get("tool_calls_used", 0), stop_reason=state.get("stop_reason") or None)
+    return TurnResult(answer, state.get("model_id"), state["messages"], state.get("tool_calls_used", 0),
+                      mode=mode, tools=[t.name for t in tools], pending=pending)
 
 
 async def _first_question(saver, thread_id: str, text: str, issue_no: int | None, mode: str,

@@ -18,6 +18,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.config import now_kst
 from app.db import connect
 
 OPEN_STATUSES = ("확인필요", "이관", "처리대기")
@@ -178,3 +179,173 @@ def summary(proposal: dict) -> str:
     """처리안 한 줄 요약(도구 결과·대화 맥락용)."""
     return (f"#{proposal['issue_no']} {proposal['issue_status']} → {proposal['new_status']} · "
             f"{change_text(proposal['mapping_change'])} · 위험 등급 {proposal['risk']}")
+
+
+def _mapping_desc(conn: sqlite3.Connection, vessel_id: str, action_seq: str, new_row: bool = False) -> str:
+    """매핑 한 줄: 'V003→103 교반 · 미수행 N' / 'V003→104 없음'. new_row면 반영 후 새로 생길 행."""
+    name = conn.execute("SELECT ACTION_DESCRIPTION FROM ACTION_MST WHERE ACTION_SEQ = ?", (action_seq,)).fetchone()
+    label = f"{vessel_id}→{action_seq} {name[0] if name else '?'}"
+    if new_row:
+        return f"{label} · 미수행 N(새 행)"
+    row = mapping_row(conn, vessel_id, action_seq)
+    if row is None:
+        return f"{vessel_id}→{action_seq} 없음"
+    done = f"수행됨 Y({row['EXECUTED_AT']})" if row["EXECUTED_YN"] == "Y" else "미수행 N"
+    return f"{label} · {done}"
+
+
+def build_card(proposal: dict, conn: sqlite3.Connection | None = None) -> dict:
+    """승인 카드. 이슈·매핑 값은 LLM이 아니라 Python이 DB에서 직접 읽은 원본이다."""
+    own = conn is None
+    conn = conn or connect()
+    try:
+        issue = conn.execute(
+            "SELECT I.*, V.VESSEL_NAME, A.ACTION_DESCRIPTION FROM ISSUE I JOIN VESSEL_MST V ON V.VESSEL_ID = I.VESSEL_ID"
+            " JOIN ACTION_MST A ON A.ACTION_SEQ = I.ACTION_SEQ WHERE I.ISSUE_NO = ?", (proposal["issue_no"],)).fetchone()
+        change = proposal["mapping_change"]
+        if change is None:
+            before, after, executed = ["매핑 변경 없음"], ["매핑 변경 없음"], "-"
+        else:
+            v, a = change["vessel_id"], change["action_seq"]
+            current = mapping_row(conn, v, a)
+            executed = current["EXECUTED_YN"] if current is not None else "-"
+            if change["kind"] == "create":
+                before, after = [_mapping_desc(conn, v, a)], [_mapping_desc(conn, v, a, new_row=True)]
+            elif change["kind"] == "delete":
+                before, after = [_mapping_desc(conn, v, a)], [f"{v}→{a} 없음"]
+            else:
+                b = change["new_action_seq"]
+                before = [_mapping_desc(conn, v, a), _mapping_desc(conn, v, b)]
+                after = [f"{v}→{a} 없음", _mapping_desc(conn, v, b, new_row=True)]
+    finally:
+        if own:
+            conn.close()
+    return {
+        "risk": proposal["risk"],
+        "tool": "propose_resolution",
+        "issue_no": proposal["issue_no"],
+        "issue_status": issue["STATUS"],
+        "new_status": proposal["new_status"],
+        "requester_id": issue["REQUESTER_ID"],
+        "inquiry": issue["INQUIRY"],
+        "input_fields": f"{issue['VESSEL_ID']} {issue['VESSEL_NAME']} / {issue['ACTION_SEQ']} {issue['ACTION_DESCRIPTION']}",
+        "change": change_text(change),
+        "before": before,
+        "after": after,
+        "executed_yn": executed,
+        "result": f"{change_text(change)} {proposal['result']}",
+    }
+
+
+def card_text(card: dict) -> str:
+    """승인 카드를 글로(대화 기록·처리 기록용). 화면은 같은 값을 표로 보여 준다."""
+    return "\n".join([
+        f"[승인 카드] 위험 등급: {card['risk']} · 도구: {card['tool']}",
+        f"- 근거: 이슈 #{card['issue_no']} ({card['issue_status']} → {card['new_status']}) · 요청자 {card['requester_id']}"
+        f" · 입력칸 {card['input_fields']}",
+        f"- 문의 원문: {card['inquiry']}",
+        f"- 대상: {card['change']}",
+        f"- 반영 전: {'; '.join(card['before'])}",
+        f"- 반영 후: {'; '.join(card['after'])}",
+        f"- 현재 수행 상태(EXECUTED_YN): {card['executed_yn']}",
+        f"- 처리결과(반영될 문장): {card['result']}",
+    ])
+
+
+# ---- 승인 뒤의 기록과 실행 ----
+
+@dataclass
+class ExecuteOutcome:
+    ok: bool
+    message: str  # 성공: '반영 완료: …' / 실패: 사유
+    revalidation: list[str] = field(default_factory=list)
+
+
+def _log(conn: sqlite3.Connection, issue_no: int, kind: str, content: str, payload: Any, user_id: str) -> None:
+    conn.execute("INSERT INTO RESOLUTION_LOG (ISSUE_NO, KIND, CONTENT, PROPOSAL_JSON, USER_ID, LOGGED_AT)"
+                 " VALUES (?, ?, ?, ?, ?, ?)",
+                 (issue_no, kind, content, json.dumps(payload, ensure_ascii=False), user_id, now_kst()))
+
+
+def record(issue_no: int, kind: str, content: str, payload: Any, user_id: str) -> None:
+    """RESOLUTION_LOG 1행을 짧은 트랜잭션으로 남긴다(승인·취소·직접 편집·실행 실패)."""
+    conn = connect()
+    try:
+        with conn:
+            _log(conn, issue_no, kind, content, payload, user_id)
+    finally:
+        conn.close()
+
+
+def record_cancel(proposal: dict, user_id: str) -> None:
+    record(proposal["issue_no"], "취소", f"취소: {summary(proposal)}", proposal, user_id)
+
+
+def record_edit(before: dict, after: dict, user_id: str) -> None:
+    record(after["issue_no"], "직접 편집", f"직접 편집: {summary(before)} ⇒ {summary(after)}",
+           {"before": before, "after": after}, user_id)
+
+
+def done_text(proposal: dict) -> str:
+    """반영 후 Python이 쓰는 정해진 문장. 예: '반영 완료: [매핑 변경] V003→104 생성, #10 완료'."""
+    return f"반영 완료: {change_text(proposal['mapping_change'])}, #{proposal['issue_no']} {proposal['new_status']}"
+
+
+def revalidate(proposal: dict, conn: sqlite3.Connection) -> list[str]:
+    """실행 직전 재검증: 이슈가 아직 열린 상태인지, 대상 매핑의 존재/부재, EXECUTED_YN이 제안 시점과 같은지,
+    새 상태가 허용된 전이인지. 처리안 검사 전체를 같은 연결(트랜잭션 안)에서 다시 돌리고 위험 등급·수행 상태를 비교한다."""
+    again = _check(proposal["issue_no"], proposal["mapping_change"], proposal["new_status"], proposal["result"],
+                   proposal["issue_no"], conn)
+    if not again.ok:
+        return again.errors
+    problems = []
+    now = again.proposal
+    if now["executed_yn"] != proposal["executed_yn"]:
+        problems.append(f"대상 매핑의 EXECUTED_YN이 제안 시점({proposal['executed_yn']})과 다릅니다(지금: {now['executed_yn']})")
+    if now["issue_status"] != proposal["issue_status"]:
+        problems.append(f"이슈 상태가 제안 시점({proposal['issue_status']})과 다릅니다(지금: {now['issue_status']})")
+    if now["risk"] != proposal["risk"]:
+        problems.append(f"위험 등급이 제안 시점({proposal['risk']})과 다릅니다(지금: {now['risk']})")
+    return problems
+
+
+def execute_proposal(proposal: dict, user_id: str, conn: sqlite3.Connection | None = None) -> ExecuteOutcome:
+    """승인된 처리안을 한 트랜잭션으로 반영한다: 재검증 → 매핑 → ISSUE → RESOLUTION_LOG('실행 성공').
+
+    재검증 실패나 DB 오류면 전체를 롤백하고 RESOLUTION_LOG에 '실행 실패(사유)'를 따로 남긴다(부분 처리 상태 없음).
+    매핑 수정 = 삭제 후 생성(새 행 EXECUTED_YN='N', EXECUTED_AT=NULL). EXECUTED 값은 바꾸지 않는다.
+    """
+    own = conn is None
+    conn = conn or connect()
+    n, change = proposal["issue_no"], proposal["mapping_change"]
+    problems: list[str] = []
+    try:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            problems = revalidate(proposal, conn)
+            if problems:
+                conn.rollback()
+                reason = "재검증 실패: " + " / ".join(problems)
+            else:
+                if change is not None:
+                    v, a = change["vessel_id"], change["action_seq"]
+                    if change["kind"] in ("delete", "update"):
+                        conn.execute("DELETE FROM VESSEL_ACTION WHERE VESSEL_ID = ? AND ACTION_SEQ = ?", (v, a))
+                    if change["kind"] == "create":
+                        conn.execute("INSERT INTO VESSEL_ACTION VALUES (?, ?, 'N', NULL)", (v, a))
+                    if change["kind"] == "update":
+                        conn.execute("INSERT INTO VESSEL_ACTION VALUES (?, ?, 'N', NULL)", (v, change["new_action_seq"]))
+                result = f"{change_text(change)} {proposal['result']}"
+                conn.execute("UPDATE ISSUE SET STATUS = ?, RESULT = ?, PROCESSED_AT = ?, PROCESSOR_ID = ? WHERE ISSUE_NO = ?",
+                             (proposal["new_status"], result, now_kst(), user_id, n))
+                _log(conn, n, "실행 성공", done_text(proposal), proposal, user_id)
+                conn.commit()
+                return ExecuteOutcome(True, done_text(proposal))
+        except sqlite3.Error as e:
+            conn.rollback()
+            reason = f"DB 오류: {type(e).__name__}: {e}"
+        record(n, "실행 실패", f"실행 실패({reason})", proposal, user_id)
+        return ExecuteOutcome(False, reason, problems)
+    finally:
+        if own:
+            conn.close()
