@@ -247,3 +247,129 @@ def test_card_one_proposal_at_a_time(db_path):
     assert turn.pending["proposal"]["new_status"] == "완료"
     second = [m for m in turn.messages if isinstance(m, ToolMessage)][-1]
     assert second.content.startswith("[오류] 한 번에 처리안 하나만")
+
+
+# ---- T26: y 실행 — 재검증 + 한 트랜잭션 ----
+
+def logs(issue):
+    return [tuple(r) for r in connect().execute(
+        "SELECT KIND, CONTENT, USER_ID FROM RESOLUTION_LOG WHERE ISSUE_NO = ? ORDER BY LOG_ID", (issue,))]
+
+
+def mapping(v, a):
+    row = connect().execute("SELECT * FROM VESSEL_ACTION WHERE VESSEL_ID = ? AND ACTION_SEQ = ?", (v, a)).fetchone()
+    return None if row is None else tuple(row)
+
+
+def test_execute_create(db_path):
+    thread, _, model = propose(2, CREATE_2, result="V003에 냉각 공정 연결")
+    calls = len(model.calls)
+    done = asyncio.run(answer_approval(thread, " Y ", llm=fake_llm(model)))
+    assert done.answer == "반영 완료: [매핑 변경] V003→104 생성, #2 완료" and done.pending is None
+    assert len(model.calls) == calls  # 반영 후 LLM을 부르지 않는다
+    assert mapping("V003", "104") == ("V003", "104", "N", None)
+    issue = connect().execute("SELECT * FROM ISSUE WHERE ISSUE_NO = 2").fetchone()
+    assert (issue["STATUS"], issue["RESULT"], issue["PROCESSOR_ID"]) == (
+        "완료", "[매핑 변경] V003→104 생성 V003에 냉각 공정 연결", "A001")
+    assert issue["PROCESSED_AT"] is not None
+    assert [k for k, _, _ in logs(2)] == ["승인", "실행 성공"]
+    assert logs(2)[1] == ("실행 성공", "반영 완료: [매핑 변경] V003→104 생성, #2 완료", "A001")
+    run = connect().execute("SELECT * FROM PROCESS_LOG ORDER BY rowid DESC").fetchone()
+    assert (run["RUN_KIND"], run["RESULT"]) == ("승인 응답", "답변 완료")
+    commit = connect().execute("SELECT OUTPUT, SUCCESS FROM CALL_LOG WHERE EVENT_KIND = 'commit'").fetchone()
+    assert tuple(commit) == ("커밋", "Y")
+    assert asyncio.run(pending_approval(thread)) is None
+    # 대화 맥락에는 정해진 문장이 남는다.
+    assert done.messages[-1].content == done.answer
+
+
+def test_execute_update_is_delete_then_create(db_path):
+    thread, _, _ = propose(3, UPDATE_3)
+    done = asyncio.run(answer_approval(thread, "y"))
+    assert done.answer == "반영 완료: [매핑 변경] V003→103 삭제, V003→105 생성, #3 완료"
+    assert mapping("V003", "103") is None and mapping("V003", "105") == ("V003", "105", "N", None)
+
+
+def test_execute_without_mapping_change(db_path):
+    before = business()[0]
+    thread, _, _ = propose(5, None, result="확인 결과 매핑 정상")
+    done = asyncio.run(answer_approval(thread, "y"))
+    assert done.answer == "반영 완료: [매핑 변경 없음], #5 완료"
+    assert business()[0] == before
+    assert connect().execute("SELECT RESULT FROM ISSUE WHERE ISSUE_NO = 5").fetchone()[0] == "[매핑 변경 없음] 확인 결과 매핑 정상"
+
+
+def explain(messages, tools):
+    assert tools is None
+    return AIMessage("이슈가 이미 닫혀 반영하지 않았습니다. 이슈 상태를 확인해 주세요.")
+
+
+def test_execute_revalidation_fails_when_issue_closed(db_path):
+    """같은 이슈에 처리안이 둘 대기하면 먼저 승인된 것만 반영되고, 나머지는 재검증에서 막힌다."""
+    t1, _, _ = propose(2, CREATE_2, user="A001")
+    t2, _, m2 = propose(2, None, status="반려", user="A002", extra=[explain])
+    assert asyncio.run(answer_approval(t1, "y")).answer.startswith("반영 완료")
+    before = business()
+    failed = asyncio.run(answer_approval(t2, "y", llm=fake_llm(m2)))
+    assert business() == before  # 업무 데이터 변화 0
+    assert failed.answer.startswith("처리안을 반영하지 못했습니다(실행 실패: 재검증 실패: 이슈 #2는 이미 닫힌 건(완료)")
+    assert "이슈가 이미 닫혀 반영하지 않았습니다" in failed.answer
+    kinds = [(k, u) for k, _, u in logs(2)]
+    assert kinds == [("승인", "A001"), ("실행 성공", "A001"), ("승인", "A002"), ("실행 실패", "A002")]
+    assert logs(2)[-1][1].startswith("실행 실패(재검증 실패: ")
+    commit = connect().execute("SELECT OUTPUT, SUCCESS FROM CALL_LOG WHERE EVENT_KIND = 'commit' ORDER BY rowid DESC").fetchone()
+    assert commit["SUCCESS"] == "N" and commit["OUTPUT"].startswith("롤백: 재검증 실패")
+    assert asyncio.run(pending_approval(t2)) is None  # 자동 재제안 없음
+
+
+def test_execute_revalidation_executed_changed(db_path):
+    thread, _, model = propose(3, UPDATE_3, extra=[explain])
+    conn = connect()
+    with conn:
+        conn.execute("UPDATE VESSEL_ACTION SET EXECUTED_YN = 'Y', EXECUTED_AT = '2026-10-23 09:00:00'"
+                     " WHERE VESSEL_ID = 'V003' AND ACTION_SEQ = '103'")
+    before = business()
+    failed = asyncio.run(answer_approval(thread, "y", llm=fake_llm(model)))
+    assert business() == before
+    assert "EXECUTED_YN이 제안 시점(N)과 다릅니다(지금: Y)" in logs(3)[-1][1]
+    assert failed.answer.startswith("처리안을 반영하지 못했습니다")
+
+
+def test_execute_revalidation_mapping_appeared(db_path):
+    thread, _, model = propose(2, CREATE_2, extra=[explain])
+    conn = connect()
+    with conn:
+        conn.execute("INSERT INTO VESSEL_ACTION VALUES ('V003', '104', 'N', NULL)")
+    before = business()
+    asyncio.run(answer_approval(thread, "y", llm=fake_llm(model)))
+    assert business() == before
+    assert "매핑이 이미 있어 생성할 수 없습니다" in logs(2)[-1][1]
+
+
+def test_execute_commit_error_rolls_back_everything(db_path):
+    thread, _, model = propose(3, UPDATE_3, extra=[explain])
+    conn = connect()
+    conn.execute("CREATE TRIGGER BOOM BEFORE INSERT ON RESOLUTION_LOG WHEN NEW.KIND = '실행 성공'"
+                 " BEGIN SELECT RAISE(ABORT, 'boom'); END")
+    conn.commit()
+    before = business()
+    failed = asyncio.run(answer_approval(thread, "y", llm=fake_llm(model)))
+    # 매핑 삭제·생성과 ISSUE 갱신이 모두 롤백된다(부분 처리 상태 없음).
+    assert business() == before
+    assert mapping("V003", "103") is not None and mapping("V003", "105") is None
+    assert logs(3)[-1][0] == "실행 실패" and "DB 오류" in logs(3)[-1][1] and "boom" in logs(3)[-1][1]
+    assert failed.answer.startswith("처리안을 반영하지 못했습니다(실행 실패: DB 오류")
+
+
+def test_execute_failure_finalize_llm_down_uses_python_sentence(db_path):
+    thread, _, _ = propose(2, CREATE_2)
+    conn = connect()
+    with conn:
+        conn.execute("UPDATE ISSUE SET STATUS = '거절', PROCESSED_AT = '2026-10-23 09:00:00', PROCESSOR_ID = 'A002'"
+                     " WHERE ISSUE_NO = 2")
+    from app.fake_llm import FakeLLMError
+
+    down = fake_llm(FakeChatModel("f", error=FakeLLMError("x")))
+    failed = asyncio.run(answer_approval(thread, "y", llm=down))
+    assert failed.answer.startswith("처리안을 반영하지 못했습니다(실행 실패: 재검증 실패")
+    assert "승인한 처리안을 반영하지 못해 아무것도 바꾸지 않았습니다" in failed.answer

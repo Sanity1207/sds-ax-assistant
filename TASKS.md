@@ -83,7 +83,7 @@
   - 확인: `pytest -q tests/test_approval.py -k propose` — 다른 이슈 번호·매핑 변경+반려 등 위반 처리안 거부, Y 매핑 삭제 → destructive
 - [x] **T25 interrupt 승인 카드** — 쓰기는 interrupt로 멈춤. 카드 항목(위험 등급·도구·전후 값·EXECUTED_YN·이슈 번호·문의 원문)은 Python이 DB에서 직접 읽음. 입력은 y/n/e만(공백·대소문자 무시), 그 밖은 비서에게 보내지 않고 다시 묻기.
   - 확인: `pytest -q tests/test_approval.py -k card` — 카드 필드가 DB 원본과 일치, "ㅇㅇ" 입력 시 LLM 호출 0·다시 묻기
-- [ ] **T26 y 실행: 재검증 + 한 트랜잭션** — 실행 직전 재검증(열린 상태·매핑 존재/부재·EXECUTED_YN 동일·전이 허용) → 매핑·ISSUE·RESOLUTION_LOG 한 트랜잭션. 처리결과 첫머리 "[매핑 변경] …"/"[매핑 변경 없음]"을 Python이 작성. 매핑 수정 = 삭제 후 생성(새 행 N·NULL). 반영 후 정해진 문장, LLM 미호출. 실패 시 전체 롤백 + "실행 실패(사유)" 별도 기록.
+- [x] **T26 y 실행: 재검증 + 한 트랜잭션** — 실행 직전 재검증(열린 상태·매핑 존재/부재·EXECUTED_YN 동일·전이 허용) → 매핑·ISSUE·RESOLUTION_LOG 한 트랜잭션. 처리결과 첫머리 "[매핑 변경] …"/"[매핑 변경 없음]"을 Python이 작성. 매핑 수정 = 삭제 후 생성(새 행 N·NULL). 반영 후 정해진 문장, LLM 미호출. 실패 시 전체 롤백 + "실행 실패(사유)" 별도 기록.
   - 확인: `pytest -q tests/test_approval.py -k execute` — 정상 반영, 재검증 실패·커밋 오류 주입 시 업무 데이터 변화 0 + 실행 실패 기록
 - [ ] **T27 n 취소 + destructive 이중 확인** — n → 업무 데이터 변화 없이 취소 기록, 대화 맥락에 "처리안 취소됨"만. destructive는 y 뒤 이슈 번호 정확히 일치해야 실행, 틀리면 다시 묻기(횟수 제한 없음).
   - 확인: `pytest -q tests/test_approval.py -k "cancel or double"` — n 후 VESSEL_ACTION·ISSUE 변화 0, 틀린 번호로는 반영 0
@@ -160,6 +160,7 @@ Claude Code로 구현하는 기준이다. 작업당 15~25분(작성 + 가짜 LLM
 - 2026-10-23 묶음 4(T17~T23) 완료: 결정 사항은 REPORT_묶음4.md
 - 2026-10-23 T24 완료: app/resolution.py check_proposal(화면 이슈만·열린 건만·상태 전이·이슈대장 일치·입력칸 대상·마스터·매핑 존재/부재, 문제 모두 모음), 위험 등급(수정·삭제 대상이 Y면 destructive), change_text. MCP 도구 propose_resolution(위험 등급 write, 검사만 하고 쓰지 않음). tests/test_approval.py -k propose 37건
 - 2026-10-23 T25 완료: 그래프에 approval 노드(interrupt). tools 노드가 propose_resolution 검사 통과 시 같은 검사로 처리안·위험 등급을 정하고 build_card(DB 원본)로 승인 대기(pending). answer_approval(실행 종류 '승인 응답', require approve)이 단계별 입력을 Python으로 판정(카드 y/n/e, 그 밖은 재개 없이 다시 묻기·LLM 0회), 승인 대기 중 run_turn 입력도 승인 응답으로 보냄. 처리안은 한 번에 하나. 실행·취소·편집 처리 코드(resolution.execute_proposal 등)도 이 작업에서 함께 넣고 확인은 T26~T28에서 한다. tests/test_approval.py -k card 17건
+- 2026-10-23 T26 완료: y → RESOLUTION_LOG '승인' → execute_proposal(BEGIN IMMEDIATE, revalidate = 처리안 검사 전체 재실행 + EXECUTED_YN·이슈 상태·위험 등급 비교, 매핑·ISSUE·'실행 성공' 한 트랜잭션, 수정 = 삭제 후 생성 N·NULL). 반영 후 정해진 문장(LLM 미호출). 실패 시 전체 롤백 + '실행 실패(사유)' 별도 기록, commit 이벤트, finalize(LLM 설명 후 멈춤, 실패 시 Python 문장). tests/test_approval.py -k execute 9건
 
 ## 실제 Bedrock 점검 목록
 

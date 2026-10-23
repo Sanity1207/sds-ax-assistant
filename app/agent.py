@@ -269,7 +269,10 @@ def finalize_messages(messages: list[BaseMessage], reason: str) -> list[BaseMess
 
 def fallback_summary(messages: list[BaseMessage], reason: str) -> str:
     """마무리 LLM 호출도 실패했을 때의 Python 문장."""
-    calls = [call_text(c) for m in _this_turn(messages) if isinstance(m, AIMessage) for c in m.tool_calls]
+    if reason.startswith("실행 실패"):
+        return (f"승인한 처리안을 반영하지 못해 아무것도 바꾸지 않았습니다. 사유: {reason.removeprefix('실행 실패: ')}\n"
+                "다음 질문 제안: get_issue로 이슈 상태와 매핑을 다시 확인해 달라고 요청해 주세요.")
+    calls =[call_text(c) for m in _this_turn(messages) if isinstance(m, AIMessage) for c in m.tool_calls]
     question = next((_text(m.content) for m in _this_turn(messages) if isinstance(m, HumanMessage)), "")
     return (f"조사 한도에 도달했습니다. 지금까지 부른 도구: {', '.join(calls) or '없음'}.\n"
             f"확인하지 못한 것: '{question}'에 대한 최종 답(마무리 답 작성도 실패했습니다).\n"
