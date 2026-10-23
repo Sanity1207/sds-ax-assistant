@@ -123,8 +123,8 @@ def test_record_chat_turn(db_path):
 
     rows = events(conn, run["RUN_ID"])
     assert [(r["EVENT_KIND"], r["NAME"], r["OUTPUT"] if r["EVENT_KIND"] == "branch" else None) for r in rows] == [
-        ("llm", "assistant@v2", None), ("branch", "should_stop", "tools"), ("tool", "find_vessel", None),
-        ("llm", "assistant@v2", None), ("branch", "should_stop", "finalize"), ("finalize", "finalize", None)]
+        ("llm", "assistant@v3", None), ("branch", "should_stop", "tools"), ("tool", "find_vessel", None),
+        ("llm", "assistant@v3", None), ("branch", "should_stop", "finalize"), ("finalize", "finalize", None)]
     tool = rows[2]
     assert json.loads(tool["INPUT"]) == {"args": {"query": "혼합"}, "risk": "read", "auto_run": True}
     assert "V003 혼합탱크 1" in tool["OUTPUT"] and tool["SUCCESS"] == "Y"
@@ -218,8 +218,8 @@ def test_export_order_uses_sequence_within_same_second(db_path, tmp_path):
     make_session()
     text = export_thread(issue_thread_id(NEW_NO, "A001"), tmp_path).read_text(encoding="utf-8")
     kinds = [h.split(" · ")[1] for h in headings(text)]
-    assert kinds == ["[말] 관리자", "[llm] assistant@v2", "[branch] should_stop", "[tool] find_vessel",
-                     "[llm] assistant@v2", "[branch] should_stop", "[finalize] finalize", "[말] 비서"]
+    assert kinds == ["[말] 관리자", "[llm] assistant@v3", "[branch] should_stop", "[tool] find_vessel",
+                     "[llm] assistant@v3", "[branch] should_stop", "[finalize] finalize", "[말] 비서"]
 
 
 def test_export_thread_file(db_path, tmp_path):

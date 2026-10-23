@@ -62,7 +62,7 @@ from app.resolution import (build_card, card_text, check_proposal, done_text, ex
 from app.tools import READ_TOOLS, TOOL_SPECS
 
 PROMPT_NAME = "assistant"
-PROMPT_VERSION = "2"
+PROMPT_VERSION = "3"
 
 # 업무와 무관한 주제에 쓰는 정해진 거절 문장(1차 구현은 시스템 프롬프트로 처리, 나중에 의도 라우터를 guard 체인에 붙일 수 있음).
 OFF_TOPIC_REPLY = "죄송하지만 저는 VESSEL·ACTION 매핑과 이슈 조사에 관한 질문만 도와드릴 수 있습니다."
@@ -101,7 +101,15 @@ SYSTEM_PROMPT = f"""당신은 공정 설비의 VESSEL·ACTION 매핑 문의를 �
 - 이슈대장과 데이터는 늘 맞아야 합니다: 매핑을 바꾸면 새 상태는 완료뿐입니다. 처리대기 건은 매핑 변경이 있어야 완료,
   반려·거절은 변경 없이만. 확인필요 건은 변경과 함께 또는 변경 없이(확인 결과 정상) 완료, 반려·거절은 변경 없이만.
   이관 건은 변경 없이만 완료·반려·거절합니다.
-- 처리안 없이 조사를 마칠 때는 log_resolution으로 근거를 남깁니다(예: 이관 건 'VESSEL 담당자 답변 대기')."""
+- 처리안 없이 조사를 마칠 때는 log_resolution으로 근거를 남깁니다(예: 이관 건 'VESSEL 담당자 답변 대기').
+
+[값 이상 조사]
+확인필요 건 중 '값이 이상하다'는 문의는 get_issue와 get_vessel_mappings로 지금 매핑을 확인하고(필요하면 find_action으로
+ACTION 이름도 확인) 원인을 둘 중 하나로 판단합니다. 어떤 매핑·이름을 보고 판단했는지 근거를 함께 씁니다.
+1. 매핑 오류: VESSEL에 잘못된 ACTION이 연결되어 있다 → 올바른 ACTION으로 교체하는 처리안(매핑 수정, 새 상태 완료)을 만듭니다.
+2. 마스터 이름·설명 불만: 매핑은 맞고 VESSEL·ACTION의 이름이나 설명이 문제다 → 마스터는 매핑 담당자가 바꿀 수 없는
+   이관 성격이므로 처리안을 만들지 않고, log_resolution으로 판단 근거와 맡을 담당(VESSEL 담당자 또는 ACTION 담당자)을 남긴 뒤
+   '이관 성격'이라고 답합니다."""
 
 OPEN_STATUSES = ("확인필요", "이관", "처리대기")
 CLOSED_STATUSES = ("완료", "반려", "거절")

@@ -258,4 +258,73 @@ def test_prompt_message_log(db_path):
     rows = connect().execute("SELECT SPEAKER, CONTENT FROM MESSAGE_LOG ORDER BY SEQ").fetchall()
     assert [tuple(r) for r in rows] == [("관리자", "V003 이름 알려 줘"), ("비서", "V003 혼합탱크 1입니다.")]
     llm_event = connect().execute("SELECT NAME FROM CALL_LOG WHERE EVENT_KIND = 'llm'").fetchone()[0]
-    assert llm_event == "assistant@v2"
+    assert llm_event == "assistant@v3"
+
+
+# ---- T30: ③ 값 이상 조사 ----
+
+from app.agent import SYSTEM_PROMPT as PROMPT_V3  # noqa: E402
+from app.classify import register_issue  # noqa: E402
+
+
+def test_anomaly_prompt_guidance():
+    for part in ("[값 이상 조사]", "매핑 오류", "올바른 ACTION으로 교체하는 처리안", "마스터 이름·설명 불만", "이관 성격",
+                 "log_resolution으로 판단 근거"):
+        assert part in PROMPT_V3
+
+
+def test_anomaly_mapping_error_ends_with_update_proposal(db_path):
+    """시드 #5: V001에 교반(103)이 붙어 있는데 냉각(104)이어야 한다는 문의 → 매핑 오류 → 103을 104로 교체하는 처리안."""
+
+    def judge(messages, tools):
+        results = {m.name: m.content for m in messages if isinstance(m, ToolMessage)}
+        # 근거: V001에 103이 미수행(N)으로 연결되어 있고, 104 냉각은 마스터에 있으며 아직 연결되지 않았다.
+        assert "V001 → 103 교반 · 미수행 N" in results["get_vessel_mappings"]
+        assert "104 냉각" in results["find_action"] and "V001 → 104" not in results["get_vessel_mappings"]
+        return tool_call("propose_resolution", {
+            "issue_no": 5, "new_status": "완료",
+            "result": "매핑 오류로 판단. 근거: V001에 교반(103)이 미수행으로 연결되어 있고 공정상 냉각(104)이 맞음",
+            "mapping_change": {"kind": "update", "vessel_id": "V001", "action_seq": "103", "new_action_seq": "104"}}, "p1")
+
+    model = FakeChatModel("f", [tool_call("get_issue", {"issue_no": 5}, "c1"),
+                                tool_call("get_vessel_mappings", {"vessel_id": "V001"}, "c2"),
+                                tool_call("find_action", {"query": "냉각"}, "c3"), judge])
+    thread = issue_thread_id(5, "A001")
+    asyncio.run(open_thread(thread))
+    result = asyncio.run(run_turn(thread, "y", fake_llm(model)))
+    assert result.pending is not None and result.pending["stage"] == "card"
+    proposal = result.pending["proposal"]
+    assert proposal["mapping_change"] == {"kind": "update", "vessel_id": "V001", "action_seq": "103", "new_action_seq": "104"}
+    assert (proposal["new_status"], proposal["risk"]) == ("완료", "write")
+    assert result.pending["card"]["after"] == ["V001→103 없음", "V001→104 냉각 · 미수행 N(새 행)"]
+    assert result.tool_calls_used == 4
+
+
+def test_anomaly_master_name_complaint_is_transfer(db_path):
+    """마스터 이름 불만(값 이상으로 분류된 새 문의) → 매핑은 맞음 → 처리안 없이 log_resolution + '이관 성격' 답."""
+    classified = {"type": "값 이상", "multiple_requests": False, "id_mismatch": False,
+                  "reason": "V002의 교반 이름이 이상하다는 문의"}
+    out = register_issue("C002", "V002", "103", "반응기 B의 '교반' 표시가 이상합니다. 현장에서는 믹싱이라고 부르는데 값이 틀린 것 같아요.",
+                         fake_llm(FakeChatModel("c", [classified])))
+    assert out.status == "확인필요"
+    n = out.issue_no
+
+    def judge(messages, tools):
+        results = {m.name: m.content for m in messages if isinstance(m, ToolMessage)}
+        assert "V002 → 103 교반 · 수행됨 Y" in results["get_vessel_mappings"]  # 매핑은 실제로 수행된 정상 연결
+        return tool_call("log_resolution", {"issue_no": n, "note": "이관 성격: 매핑 V002→103은 정상(수행됨 Y). "
+                                            "ACTION 103 이름(교반) 변경 요청이므로 ACTION 담당자 확인 필요"}, "l1")
+
+    model = FakeChatModel("f", [tool_call("get_issue", {"issue_no": n}, "c1"),
+                                tool_call("get_vessel_mappings", {"vessel_id": "V002"}, "c2"), judge,
+                                AIMessage("이관 성격입니다. 매핑 V002→103은 정상이고, ACTION 103의 이름 문제라 "
+                                          "ACTION 담당자(오세훈, 내선 1003)가 확인해야 합니다.")])
+    thread = issue_thread_id(n, "A001")
+    asyncio.run(open_thread(thread))
+    result = asyncio.run(run_turn(thread, "y", fake_llm(model)))
+    assert result.pending is None and "이관 성격" in result.answer and "ACTION 담당자" in result.answer
+    conn = connect()
+    note = conn.execute("SELECT KIND, CONTENT, USER_ID FROM RESOLUTION_LOG WHERE ISSUE_NO = ?", (n,)).fetchone()
+    assert note["KIND"] == "note" and note["CONTENT"].startswith("이관 성격") and note["USER_ID"] == "A001"
+    # 처리안이 없으므로 이슈 상태·매핑은 그대로
+    assert conn.execute("SELECT STATUS FROM ISSUE WHERE ISSUE_NO = ?", (n,)).fetchone()[0] == "확인필요"
