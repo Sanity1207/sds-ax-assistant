@@ -20,7 +20,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage  # noqa
 
 from app import config  # noqa: E402
 from app.agent import (CARD_QUESTION, CONFIRM_QUESTION, MODE_NAMES, REQUEST_TAG, McpUnavailable,  # noqa: E402
-                       answer_approval, fill_customer_names, free_thread_id, issue_mode, issue_thread_id,
+                       answer_approval, fill_customer_names, free_thread_id, issue_mode, issue_thread_id, message_text,
                        load_messages, needs_retry, open_thread, pending_approval, retry_turn, run_turn)
 from app.resolution import CLOSED_TARGETS  # noqa: E402
 from app.auth import DEFAULT_USER, PermissionDenied, can, get_user, selectable_users  # noqa: E402
@@ -221,15 +221,17 @@ def show_message(message) -> None:
     if getattr(message, "name", None) == REQUEST_TAG:  # 첫 질문 y를 Python이 바꾼 조사 요청(관리자가 친 말은 y)
         return
     if isinstance(message, HumanMessage):
-        st.chat_message("user").write(message.content)
+        st.chat_message("user").write(message_text(message.content))
     elif isinstance(message, ToolMessage):
-        st.chat_message("assistant").caption(f"도구 결과({message.name}): {message.content}")
+        st.chat_message("assistant").caption(f"도구 결과({message.name}): {message_text(message.content)}")
     elif isinstance(message, AIMessage):
+        # 실제 Bedrock은 도구 호출과 설명 글을 함께 보내면 content를 블록 목록으로 준다. 글 블록만 보여 준다.
+        text = message_text(message.content)
+        if text.strip():
+            # 고객 안내 초안의 {고객:ID} 자리표시는 화면에서 Python이 이름으로 채운다(발송 없음).
+            st.chat_message("assistant").write(fill_customer_names(text))
         for call in message.tool_calls:
             st.chat_message("assistant").caption(f"도구 호출: {call['name']}({call['args']})")
-        if message.content:
-            # 고객 안내 초안의 {고객:ID} 자리표시는 화면에서 Python이 이름으로 채운다(발송 없음).
-            st.chat_message("assistant").write(fill_customer_names(message.content))
 
 
 def work(call):

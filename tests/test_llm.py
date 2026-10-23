@@ -80,3 +80,20 @@ def test_bedrock_client_settings():
     boto = client.client.meta.config
     assert boto.read_timeout == 60
     assert boto.retries["total_max_attempts"] == 1
+
+
+# ---- LLM 응답의 입구에서 content를 늘 글로 ----
+
+def test_chat_content_always_text():
+    from langchain_core.messages import AIMessage
+
+    blocks = AIMessage(content=[{"type": "text", "text": "찾아볼게요."},
+                                {"type": "tool_use", "id": "tu1", "name": "find_vessel", "input": {"query": "혼합"}}],
+                       tool_calls=[{"name": "find_vessel", "args": {"query": "혼합"}, "id": "tu1"}])
+    result = fake_llm(FakeChatModel("f", [blocks])).chat([])
+    assert result.value.content == "찾아볼게요."  # 글로 바뀜
+    assert result.value.tool_calls == blocks.tool_calls  # 도구 호출은 그대로
+    assert result.raw is blocks  # 원본은 처리 기록용 raw에 남음
+    only_tool = AIMessage(content=[{"type": "tool_use", "id": "t", "name": "x", "input": {}}],
+                          tool_calls=[{"name": "x", "args": {}, "id": "t"}])
+    assert fake_llm(FakeChatModel("f", [only_tool])).chat([]).value.content == ""

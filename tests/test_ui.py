@@ -422,3 +422,66 @@ def test_approval_typed_answers_work(db_path):
     at = to_card(open_app(), 2)
     at.chat_input[0].set_value(" Y ").run()
     assert issue_row(2)["STATUS"] == "완료"
+
+
+# ---- 실제 Bedrock 형식: 설명 글 + 도구 호출이 블록 목록으로 오는 AIMessage (시연 중 발견, issue-10-A001) ----
+
+def bedrock_style_tool_call(text, name, args, call_id):
+    """ChatBedrockConverse가 도구 호출과 설명 글을 함께 돌려줄 때의 모양: content가 블록 목록."""
+    from langchain_core.messages import AIMessage
+
+    return AIMessage(content=[{"type": "text", "text": text},
+                              {"type": "tool_use", "id": call_id, "name": name, "input": args}],
+                     tool_calls=[{"name": name, "args": args, "id": call_id}])
+
+
+def test_block_list_content_renders(db_path, monkeypatch):
+    from langchain_core.messages import AIMessage as AI, ToolMessage as TM
+
+    from app import fake_llm as fake
+
+    def chat(self, messages, tools=None):
+        if isinstance(messages[-1], TM):
+            return AI(content=[{"type": "text", "text": "{고객:C001} 고객님, V003 혼합탱크 1입니다."}])
+        return bedrock_style_tool_call("먼저 혼합탱크를 찾아볼게요.", "find_vessel", {"query": "혼합"}, "tooluse_1")
+
+    monkeypatch.setattr(fake.DemoChatModel, "chat", chat)
+    at = open_app()
+    at.sidebar.radio(key="page").set_value("조사 비서").run()
+    at.chat_input[0].set_value("혼합탱크 ID 알려 줘").run()
+    assert not at.exception
+    texts = chat_texts(at, "assistant")
+    assert "먼저 혼합탱크를 찾아볼게요." in texts  # 글 블록만 보이고
+    assert "도구 호출: find_vessel({'query': '혼합'})" in texts  # 도구 호출은 따로 표시
+    assert "김민수 고객님, V003 혼합탱크 1입니다." in texts  # 블록 목록이어도 고객 이름 채우기
+    assert not any("tool_use" in t for t in texts)
+
+    # LLM 래퍼가 입구에서 글로 바꾸므로 체크포인터에는 문자열로 저장된다.
+    from app.agent import load_messages
+
+    thread = at.caption[0].value.split("thread ")[1]
+    stored = [m for m in asyncio.run(load_messages(thread)) if m.type == "ai"]
+    assert all(isinstance(m.content, str) for m in stored)
+    assert stored[0].content == "먼저 혼합탱크를 찾아볼게요." and stored[0].tool_calls[0]["id"] == "tooluse_1"
+
+
+def test_block_list_content_legacy_thread_renders(db_path):
+    """변경 전에 블록 목록 그대로 저장된 thread(시연의 issue-10-A001)를 열어도 화면이 그려진다."""
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from app.agent import build_graph, open_checkpointer
+
+    async def save():
+        async with open_checkpointer() as saver:
+            graph = build_graph(None, [], saver)
+            await graph.aupdate_state({"configurable": {"thread_id": "issue-1-A001"}}, {"messages": [
+                HumanMessage("완료 건 요약해 줘"),
+                AIMessage(content=[{"type": "text", "text": "옛 형식 답변입니다."},
+                                   {"type": "tool_use", "id": "t1", "name": "get_issue", "input": {"issue_no": 1}}])]},
+                as_node="finalize")
+
+    asyncio.run(save())
+    at = ledger(open_app())
+    at.button(key="investigate_1").click().run()
+    assert not at.exception
+    assert "옛 형식 답변입니다." in chat_texts(at, "assistant")

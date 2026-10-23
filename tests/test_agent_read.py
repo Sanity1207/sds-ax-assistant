@@ -328,3 +328,28 @@ def test_anomaly_master_name_complaint_is_transfer(db_path):
     assert note["KIND"] == "note" and note["CONTENT"].startswith("이관 성격") and note["USER_ID"] == "A001"
     # 처리안이 없으므로 이슈 상태·매핑은 그대로
     assert conn.execute("SELECT STATUS FROM ISSUE WHERE ISSUE_NO = ?", (n,)).fetchone()[0] == "확인필요"
+
+
+# ---- 실제 Bedrock 형식의 블록 목록 content ----
+
+from app.agent import fill_customer_names, message_text  # noqa: E402
+
+
+def test_block_list_content_text():
+    blocks = [{"type": "text", "text": "첫 줄"}, {"type": "tool_use", "id": "t", "name": "find_vessel", "input": {}},
+              {"type": "text", "text": "둘째 줄"}]
+    assert message_text(blocks) == "첫 줄\n둘째 줄"
+    assert message_text([{"type": "tool_use", "id": "t", "name": "x", "input": {}}]) == ""
+    assert message_text("그대로") == "그대로" and message_text(None) == ""
+
+
+def test_block_list_content_turn(db_path):
+    first = AIMessage(content=[{"type": "text", "text": "찾아볼게요."},
+                               {"type": "tool_use", "id": "tu1", "name": "find_vessel", "input": {"query": "혼합"}}],
+                      tool_calls=[{"name": "find_vessel", "args": {"query": "혼합"}, "id": "tu1"}])
+    final = AIMessage(content=[{"type": "text", "text": "{고객:C002}님, V003입니다."}])
+    result = asyncio.run(run_turn("free-A001-20261023-101500", "혼합탱크?", fake_llm(FakeChatModel("f", [first, final]))))
+    assert result.answer == "{고객:C002}님, V003입니다." and result.tool_calls_used == 1
+    assert fill_customer_names(final.content) == "이서연님, V003입니다."
+    rows = connect().execute("SELECT SPEAKER, CONTENT FROM MESSAGE_LOG ORDER BY SEQ").fetchall()
+    assert [tuple(r) for r in rows][-1] == ("비서", "{고객:C002}님, V003입니다.")

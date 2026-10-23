@@ -130,7 +130,8 @@ class FallbackLLM:
                 attempts.append(Attempt(model.model_id, False, time.monotonic() - started, _describe(e)))
                 continue
             attempts.append(Attempt(model.model_id, True, time.monotonic() - started))
-            return LLMResult(message, model.model_id, attempts, raw=message)
+            # 대화 상태·화면·기록에는 늘 글로 바꾼 응답을 쓴다. 원본(블록 목록일 수 있음)은 raw로 처리 기록에 남긴다.
+            return LLMResult(as_text_message(message), model.model_id, attempts, raw=message)
         raise AllModelsFailed(_all_failed_text(attempts), attempts)
 
     def structured(self, messages: list[BaseMessage], schema: type[BaseModel]) -> LLMResult:
@@ -151,6 +152,35 @@ class FallbackLLM:
             attempts.append(Attempt(model.model_id, True, seconds))
             return LLMResult(parsed, model.model_id, attempts, raw=raw)
         raise AllModelsFailed(_all_failed_text(attempts), attempts)
+
+
+def message_text(content) -> str:
+    """메시지 내용을 문자열 하나로 바꾼다. 글 블록만 이어 붙이고 도구 호출 등 다른 블록은 뺀다.
+
+    내용은 블록 목록일 수 있다: 실제 Bedrock이 도구 호출과 설명 글을 함께 보낸 AIMessage
+    (예: [{"type": "text", "text": "…"}, {"type": "tool_use", …}]), MCP 도구 결과.
+    """
+    if isinstance(content, str):
+        return content
+    parts = []
+    for block in content or []:
+        if isinstance(block, dict):
+            if block.get("text"):
+                parts.append(block["text"])
+        elif isinstance(block, str):
+            parts.append(block)
+    return "\n".join(parts)
+
+
+def as_text_message(message: AIMessage) -> AIMessage:
+    """AIMessage의 content를 늘 문자열로 맞춘다(LLM 응답의 입구에서 한 번).
+
+    도구 호출은 tool_calls에 그대로 남는다. langchain-aws는 다음 호출 때 tool_calls로 Bedrock의 도구 블록을 다시
+    만드므로(_upsert_tool_calls_to_bedrock_content) content의 도구 블록을 지워도 대화가 깨지지 않는다.
+    """
+    if isinstance(message.content, str):
+        return message
+    return message.model_copy(update={"content": message_text(message.content)})
 
 
 def _describe(error: Exception) -> str:

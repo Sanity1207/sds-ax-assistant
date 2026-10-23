@@ -54,7 +54,7 @@ from app.auth import require
 from app.config import KST
 from app.db import connect
 from app.guard import run_guard
-from app.llm import FallbackLLM, LLMError, get_llm
+from app.llm import FallbackLLM, LLMError, get_llm, message_text
 from app.mcp_server import server_command
 from app.recorder import Run, Timer, start_run
 from app.resolution import (build_card, card_text, check_proposal, done_text, execute_proposal, record, record_cancel,
@@ -158,22 +158,18 @@ class AgentState(TypedDict, total=False):
     first_question: str  # pending(답 대기) / answered
 
 
-def _text(content) -> str:
-    """MCP 어댑터가 돌려준 내용(텍스트 블록 목록일 수 있음)을 문자열 하나로 바꾼다."""
-    if isinstance(content, str):
-        return content
-    parts = []
-    for block in content or []:
-        parts.append(block.get("text", "") if isinstance(block, dict) else str(block))
-    return "\n".join(parts)
+# 블록 목록 → 글 변환은 LLM 래퍼(app/llm.py)의 함수 하나를 쓴다. LLM 응답은 래퍼가 입구에서 이미 글로 바꾸고,
+# 여기서는 MCP 도구 결과와 이 변경 전에 체크포인터에 저장된 옛 메시지를 위해 같은 함수를 쓴다.
+_text = message_text
 
 
 # 고객 안내 초안의 고객 자리표시. LLM에는 고객 ID만 넘기고, 이름은 화면 표시 단계에서 Python이 채운다.
 _CUSTOMER = re.compile(r"\{고객:([A-Za-z0-9_]+)\}")
 
 
-def fill_customer_names(text: str) -> str:
-    """'{고객:C003}' → '박지훈'(USER_MST의 이름). 없는 ID는 그대로 둔다."""
+def fill_customer_names(text) -> str:
+    """'{고객:C003}' → '박지훈'(USER_MST의 이름). 없는 ID는 그대로 둔다. 블록 목록이 와도 글로 바꿔 처리한다."""
+    text = message_text(text)
     ids = set(_CUSTOMER.findall(text or ""))
     if not ids:
         return text
