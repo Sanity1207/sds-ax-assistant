@@ -17,6 +17,7 @@ from typing import Literal
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field, field_validator
 
+from app.auth import PermissionDenied, require
 from app.config import now_kst
 from app.db import connect
 from app.llm import FallbackLLM, LLMError, get_llm
@@ -87,6 +88,10 @@ CLOSED_STATUSES = ("반려", "거절")
 FAILED_RESULT = "자동 분류 실패"
 
 
+class RegistrationRejected(Exception):
+    """등록 전 검사에서 거부됐다. ISSUE는 저장하지 않았다. 메시지가 화면에 보여 줄 사유다."""
+
+
 @dataclass
 class ClassifyOutcome:
     issue_no: int
@@ -121,13 +126,23 @@ def result_text(c: Classification) -> str:
 
 def register_issue(requester_id: str, vessel_id: str, action_seq: str, inquiry: str,
                    llm: FallbackLLM | None = None, conn: sqlite3.Connection | None = None) -> ClassifyOutcome:
-    """문의를 ISSUE에 저장하고 바로 자동 분류한다. 등록 전 검사(T14)는 아직 없고 DB 제약이 막는다."""
+    """문의를 ISSUE에 저장하고 바로 자동 분류한다.
+
+    등록 전 검사: 요청자가 없거나 등록 권한(요청 고객·관리자)이 없으면 저장하지 않고 RegistrationRejected.
+    칸 검사(빈 값·여러 값·마스터에 없음)는 T14에서 더하고, 그때까지는 DB 제약이 막는다.
+    """
     own = conn is None
     conn = conn or connect()
     try:
         with start_run("문의 등록", "SYSTEM") as run:
             submitted = {"requester_id": requester_id, "vessel_id": vessel_id, "action_seq": action_seq,
                          "inquiry": inquiry}
+            try:
+                require(requester_id, "register", conn)
+            except PermissionDenied as e:
+                run.event("branch", "등록 전 검사", submitted, f"거부: {e}")
+                run.finish("등록 거부")
+                raise RegistrationRejected(str(e)) from None
             run.event("branch", "등록 전 검사", submitted, "통과")
             with conn:
                 # 분류가 끝나기 전에 앱이 멈춰도 [다시 분류]로 이어갈 수 있도록 '자동 분류 실패' 확인필요로 먼저 저장한다.

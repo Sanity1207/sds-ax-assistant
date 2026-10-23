@@ -62,3 +62,82 @@ def test_skeleton_ledger_is_read_only(db_path):
     register(at, "V003", "104", "V003에 104 추가")
     at.sidebar.radio(key="page").set_value("이슈대장").run()
     assert len(at.text_input) == 0 and len(at.text_area) == 0
+
+
+# ---- T12: 사용자 선택·권한 ----
+
+import asyncio  # noqa: E402
+
+import pytest  # noqa: E402
+
+from app.agent import issue_thread_id, run_turn  # noqa: E402
+from app.auth import PermissionDenied  # noqa: E402
+from app.classify import RegistrationRejected, register_issue  # noqa: E402
+
+
+def as_user(at, user_id):
+    at.selectbox(key="current_user").set_value(user_id).run()
+    assert not at.exception
+    return at
+
+
+def investigate_buttons(at):
+    return [b for b in at.button if str(b.key or "").startswith("investigate_")]
+
+
+def test_role_default_user_and_dropdown(db_path):
+    at = open_app()
+    box = at.selectbox(key="current_user")
+    assert box.value == "A001"
+    assert box.options == ["윤도현 (관리자)", "한지민 (관리자)", "김민수 (요청 고객)", "이서연 (요청 고객)",
+                           "박지훈 (요청 고객)", "최유진 (요청 고객)", "정하늘 (조회 고객)"]
+    assert not any("시스템" in o for o in box.options)  # SYSTEM은 고를 수 없다
+    assert at.sidebar.radio(key="page").options == ["이슈대장", "신규 문의 등록", "조사 비서"]
+    assert investigate_buttons(at)
+
+
+def test_role_viewer_reads_only(db_path):
+    at = as_user(open_app(), "C005")
+    assert at.sidebar.radio(key="page").options == ["이슈대장"]
+    assert len(at.dataframe) == 1  # 이슈대장은 읽을 수 있다
+    assert not investigate_buttons(at)
+    assert len(at.text_area) == 0 and not [b for b in at.button if "등록" in (b.label or "")]
+
+
+def test_role_requester_registers_but_no_investigation(db_path):
+    at = as_user(open_app(), "C001")
+    assert at.sidebar.radio(key="page").options == ["이슈대장", "신규 문의 등록"]
+    assert not investigate_buttons(at)
+    register(at, "V003", "104", "V003에 104 추가해 주세요")
+    assert at.success[0].value.startswith(f"접수됨 #{NEW_NO}")
+    assert connect().execute("SELECT REQUESTER_ID FROM ISSUE WHERE ISSUE_NO = ?", (NEW_NO,)).fetchone()[0] == "C001"
+
+
+def test_role_switch_away_from_forbidden_page(db_path):
+    at = open_app()
+    at.sidebar.radio(key="page").set_value("조사 비서").run()
+    as_user(at, "C005")
+    assert at.sidebar.radio(key="page").value == "이슈대장"
+    as_user(at, "A002")
+    assert at.sidebar.radio(key="page").options == ["이슈대장", "신규 문의 등록", "조사 비서"]
+
+
+@pytest.mark.parametrize("user_id, reason", [("C005", "문의 등록 권한이 없습니다"), ("SYSTEM", "문의 등록 권한이 없습니다"),
+                                             ("X999", "USER_MST에 없습니다")])
+def test_role_register_function_rejects(db_path, user_id, reason):
+    with pytest.raises(RegistrationRejected, match=reason):
+        register_issue(user_id, "V003", "104", "V003에 104 추가")
+    conn = connect()
+    assert conn.execute("SELECT COUNT(*) FROM ISSUE").fetchone()[0] == len(ISSUES)  # 저장하지 않음
+    run = conn.execute("SELECT * FROM PROCESS_LOG").fetchone()
+    assert (run["RESULT"], run["ISSUE_NO"], run["USER_ID"]) == ("등록 거부", None, "SYSTEM")
+    branch = conn.execute("SELECT OUTPUT FROM CALL_LOG WHERE EVENT_KIND = 'branch'").fetchone()[0]
+    assert branch.startswith("거부:")
+    assert conn.execute("SELECT COUNT(*) FROM CALL_LOG WHERE EVENT_KIND = 'llm'").fetchone()[0] == 0  # LLM 안 부름
+
+
+@pytest.mark.parametrize("user_id", ["C001", "C005", "X999"])
+def test_role_assistant_function_rejects_non_admin(db_path, user_id):
+    with pytest.raises(PermissionDenied):
+        asyncio.run(run_turn(issue_thread_id(2, user_id), "조사해 줘"))
+    assert connect().execute("SELECT COUNT(*) FROM PROCESS_LOG").fetchone()[0] == 0

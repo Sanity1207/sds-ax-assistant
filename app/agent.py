@@ -31,6 +31,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 
 from app import config
+from app.auth import require
 from app.config import KST
 from app.llm import FallbackLLM, LLMError, get_llm
 from app.mcp_server import server_command
@@ -167,6 +168,7 @@ async def run_turn(thread_id: str, text: str, llm: FallbackLLM | None = None, *,
     issue_no = issue_no if issue_no is not None else parsed_issue
     if user_id is None:
         raise ValueError(f"thread ID '{thread_id}'에서 사용자를 알 수 없습니다. user_id를 주세요.")
+    require(user_id, "investigate")  # 조사 비서는 관리자만(화면 제한과 별개로 다시 확인)
     llm = llm or get_llm()
     with start_run("대화 입력", user_id, issue_no, thread_id) as run:
         run.message("관리자", text)
