@@ -2,7 +2,7 @@ goal: VESSEL·ACTION 매핑 문의를 로컬 Streamlit 웹 앱에서 등록하�
   SQLite 이슈대장(ISSUE)에 기록한다. 매핑 담당자는 FastMCP 도구를 쓰는 LangGraph ReAct 조사 비서와 대화하며 열린
   이슈를 조사한다. 비서가 만든 처리안(매핑 변경 + 상태 변경)은 담당자가 승인해야만 한 SQLite 트랜잭션으로 반영된다. 이 시스템을 C:\Users\SDS\Desktop\sds-ax-assistant에
   그린필드로 순수 구현 12시간 안에 만들고, SDS AX Day1~7 개념(구조화 출력, ReAct 루프, MCP, 에러 메시지=프롬프트, 실패
-  분류·폴백, 승인 게이트, 마스킹, trace, 평가셋·전후 비교)을 실제로 적용한다.
+  분류·폴백, 승인 게이트, trace, 평가셋·전후 비교)을 실제로 적용한다.
 task_type: code
 brownfield_context:
   project_type: greenfield
@@ -18,40 +18,64 @@ constraints:
 - '설치 허락 라이브러리: mcp, langchain-mcp-adapters, streamlit'
 - '진행 순서: 문서(SERVICE.md → TASKS.md) 먼저, 그다음 구현'
 - '시간 예산: 순수 구현 12시간(문서 작업 제외). 부족하면 ③ 값 이상 조사·④ 반려 재요청부터 축소·연기'
-- '완성 순서: ⓪ DB·시드·이슈대장 화면 → Ⓐ 신규 등록·자동 분류 → ② 자유 질의 → ① 처리안 승인(처리대기·확인필요·이관 건 종결)
+- '완성 순서: ⓪ DB·시드·사용자 선택·이슈대장 화면·처리 기록 장치 → Ⓐ 신규 등록·자동 분류·처리 기록 파일 출력 → ② 자유 질의 → ① 처리안 승인(처리대기·확인필요·이관 건 종결)
   → ③ 값 이상 조사 → ④ 반려 건 재요청 버튼'
-- 데이터는 자체 시드 스크립트가 만든 SQLite 복사본(VESSEL_MST, ACTION_MST, VESSEL_ACTION, CUSTOMER_MST,
+- 데이터는 자체 시드 스크립트가 만든 SQLite 복사본(VESSEL_MST, ACTION_MST, VESSEL_ACTION, USER_MST,
   OWNER_MST, PROCESS_LOG, MESSAGE_LOG, CALL_LOG, ISSUE, RESOLUTION_LOG)이며 기존 sds-ax-project
   데이터·코드는 수정하지 않음(분류 스키마·프롬프트 참고만 가능)
+- '마스터·매핑 시드 값은 기존 프로젝트와 같음: VESSEL_MST 5건(V001 반응기 A, V002 반응기 B, V003 혼합탱크 1, V004 저장탱크 1,
+  V005 세정조 1), ACTION_MST 6건(101 원료 투입, 102 가열, 103 교반, 104 냉각, 105 배출, 106 세정), VESSEL_ACTION 7건(V001→101/102/103,
+  V002→103, V003→103, V004→105, V005→106. 수행됨 Y = V001→101 2026-10-20 09:00:00, V001→102 2026-10-20 10:30:00,
+  V002→103 2026-10-21 14:00:00, V004→105 2026-10-21 16:20:00, 나머지 N·NULL), USER_MST 7건(C001 김민수·C002 이서연·C003 박지훈·C004
+  최유진 = 요청 고객, C005 정하늘 = 조회 고객, A001 윤도현·A002 한지민 = 관리자), OWNER_MST 3건(역할별 안내용 연락처: 매핑 담당자
+  윤도현 내선 1001, VESSEL 담당자 강수진 내선 1002, ACTION 담당자 오세훈 내선 1003. VESSEL·ACTION 담당자는 계정이 아님)'
+- '권한 3종(USER_MST.ROLE): 조회 고객 = 이슈대장 읽기만 / 요청 고객 = 이슈대장 읽기 + 문의 등록 / 관리자 = 읽기 + 등록 + 이슈 조사·처리안
+  승인. 관리자는 매핑 담당자를 뜻함'
+- '사용자 선택: 우측 상단에 현재 사용자(이름·권한) 표시, 드롭다운으로 변경, 비밀번호 없음. 앱 시작 시 A001. 권한 검사는 화면 표시 제한과
+  함께 등록·승인 함수 안에서 Python이 다시 확인'
+- 'DB는 data/app.db 단일 파일. 시드 스크립트를 다시 실행하면 처음 상태로 초기화하며, 평가 실행기도 케이스마다 초기화'
+- '시각은 KST YYYY-MM-DD HH:MM:SS TEXT. 처리상태·담당자 값은 한글로 저장하고 CHECK 제약으로 허용 값만 받음. ISSUE 번호는 DB 자동 증가
+  정수'
+- 'VESSEL_ACTION은 (VESSEL_ID, ACTION_SEQ) 복합 PK, 마스터로의 FOREIGN KEY(연결마다 PRAGMA foreign_keys = ON), EXECUTED_YN=''Y''면
+  EXECUTED_AT 필수, ''N''이면 NULL'
 - issues.xlsx는 쓰지 않음. 이슈대장은 SQLite ISSUE 테이블(번호, 접수일시, 요청자 ID, VESSEL_ID, ACTION_SEQ,
-  문의내용, 담당자, 처리상태, 처리결과, 처리일시, PARENT_ISSUE_NO)이며, 시드가 확인필요·이관·반려 건을 넣음
-- RESOLUTION_LOG는 append-only이고 LEDGER_APPLIED(Y/N)로 '로그만 남고 이슈 갱신이 거절된 상태'를 구분. 매핑
-  쓰기의 승인·거절·실행 결과는 Python이 자동 기록
-- 'Streamlit 로컬 웹 UI 화면 3개: (1) 이슈대장(조회·필터·상세, 행마다 ''이 건 조사'' 버튼으로 그 이슈의 비서 대화 시작)
-  (2) 신규 문의 등록 폼(VESSEL_ID·ACTION_SEQ는 마스터 목록에서 고르는 구조화 입력, 문의내용은 자유 텍스트, 처리 대상은 입력칸
-  값) (3) 조사 비서 대화 + 승인 카드'
+  문의내용, 담당자, 처리상태, 처리결과, 처리일시, 처리자, PARENT_ISSUE_NO). 담당자는 역할 이름, 처리자는 승인해서 종결한 관리자 ID
+- '시드 이슈 9건(자동 분류를 거치지 않아 처리 기록 없음, get_issue_trace는 ''시드로 넣은 건이라 기록 없음''을 돌려줌): 처리대기 3(매핑 생성,
+  매핑 수정, 수행된 Y 매핑 삭제 = destructive), 확인필요 2(값 이상, 자동 분류 실패), 이관 1(ACTION 이름 변경 요청), 반려 2(ACTION_SEQ
+  빈칸, 한 문의에 요청 두 개(C004)), 완료 1. 모든 시드 이슈의 요청자는 요청 고객(C001~C004). 문의 문구·대상 값은 SERVICE.md에서
+  확정'
+- 'RESOLUTION_LOG는 append-only(칸: 이슈 번호, 종류(note·승인·거절·수정 지시·실행 성공·실행 실패), 내용, 처리안 JSON, 기록 시각).
+  처리안의 승인·거절·실행 결과는 Python이 자동 기록'
+- 'Streamlit 로컬 웹 UI 화면 3개: (1) 이슈대장(모든 권한이 읽기 가능. 조회·필터(''내 요청만'' 포함)·상세, 관리자에게만 행마다 ''이 건 조사''
+  버튼으로 그 이슈의 비서 대화 시작)
+  (2) 신규 문의 등록 폼(요청자 ID는 현재 사용자 ID로 고정, VESSEL_ID·ACTION_SEQ는 마스터 목록에서 고르는 필수 입력, 문의내용은 자유 텍스트,
+  처리 대상은 입력칸 값. 마스터 추가 요청도 관련 VESSEL을 골라 두고 문의내용으로 판단) (3) 조사 비서 대화 + 승인 카드'
 - 이슈대장에서 담당자가 값을 직접 고치지 않음. 변경은 Agent 처리안 + 승인으로만 반영
-- '자동 분류는 등록 즉시 실행: 1단계 Python 검사(고객 ID 없음·미등록 → 반려, 담당자 빈칸; 칸 문제(빈 값·여러 값·마스터에 없음)
+- '자동 분류는 등록 즉시 실행: 1단계 Python 검사(요청자가 USER_MST에 없거나 등록 권한(요청 고객·관리자) 없음 → 반려, 담당자 빈칸. 폼에서는 생길 수 없는 방어선; 칸 문제(빈 값·여러 값·마스터에 없음)
   → 반려, 매핑 담당자) → 2단계 LLM 구조화 출력 1회 → Python 규칙으로 담당자·처리상태 결정'
 - '자동 분류 규칙표: 매핑 생성·수정·삭제 → 처리대기, 매핑 담당자 / 한 문의에 요청 여러 개 → 반려, 매핑 담당자 / 값 이상 → 확인필요,
   매핑 담당자 / 마스터 요청 대상 VESSEL → 이관, VESSEL 담당자 / 대상 ACTION → 이관, ACTION 담당자 / 대상 둘 다
   → 이관, "VESSEL 담당자, ACTION 담당자" / 마스터 요청 대상 모름 → 반려, 매핑 담당자 / 담당 외 → 거절, 담당자 빈칸 /
   판단 불가 → 확인필요, 매핑 담당자'
+- 1단계 칸 검사는 폼에서 생길 수 없는 경우(여러 값·마스터에 없음)도 그대로 둔다. 시드·평가가 DB에 직접 넣는 값을 막는 방어선
 - LLM 확신도 필드는 두지 않고 '판단 불가' 유형으로 받음
 - 분류 실패(스키마 오류·모든 모델 실패) 시 문의는 저장하고 확인필요, 매핑 담당자, 처리결과 '자동 분류 실패'로 두며 화면에 [다시 분류]
-  버튼 표시. [다시 분류]는 같은 이슈를 갱신하고 trace에 기록
+  버튼 표시. [다시 분류]는 같은 이슈를 갱신하고 처리 기록에 새 실행으로 남김
 - 자동 분류 단계에서는 매핑 변경을 절대 하지 않음
 - 'MCP 도구 — 읽기 6개: find_vessel(query), find_action(query), get_vessel_mappings(vessel_id),
-  list_issues(status?, since?, limit=10), get_issue(issue_no), get_issue_trace(issue_no)(이
-  앱의 분류 기록을 읽음) / 쓰기 1개: propose_resolution(issue_no, mapping_change?, new_status,
+  list_issues(status?, since?, limit=10), get_issue(issue_no), get_issue_trace(issue_no)(그
+  이슈의 처리 기록을 요약해 읽음) / 쓰기 1개: propose_resolution(issue_no, mapping_change?, new_status,
   result) / 로그 1개: log_resolution(issue_no, note)(append-only, 위험 등급 log, 승인 없이 자동)'
 - 도구 반환은 정해진 형식의 사람이 읽는 문자열. 오류는 예외 대신 안내 문자열(받은 값·쓸 수 있는 값·다음 행동)
 - 위험 등급은 LLM이 아니라 Python이 DB 상태로 결정. 미등록 도구는 승인 필요(fail-safe). 처리안에 EXECUTED_YN='Y'
   매핑이 포함되면 destructive
+- 문의 원문과 도구 결과는 신뢰하지 않는 데이터로 취급한다. 그 안의 지시문은 도구 호출 여부, 위험 등급, 승인 필요 여부, 상태
+  전이를 바꿀 수 없으며, 분류·비서 시스템 프롬프트에 이를 명시한다
 - TOOL_SPECS(메뉴판)와 TOOLS_IMPL(구현)을 분리하고, import 시 이름 일치를 assert
 - 조회는 자동 실행, 쓰기는 LangGraph interrupt로 사람 승인 후 실행
 - '승인 카드 표시 항목: 위험 등급·도구 이름·대상(VESSEL/ACTION 전후 값)·현재 수행 상태(EXECUTED_YN)·근거(이슈 번호와
   문의 원문). 카드 내용은 Python이 DB에서 직접 읽은 원본'
+- RESOLUTION_LOG와 처리 기록에는 행동한 사용자 ID를 함께 남긴다
 - '승인 UX y/n/e: y=실행, n=실행하지 않고 Agent에 ''거절됨'' 전달, e=담당자 수정 지시를 Agent에 돌려주어 다시 계획.
   destructive는 y 뒤에 이슈 번호를 한 번 더 입력하는 이중 확인'
 - 승인 단위는 처리안(매핑 변경 + 이슈 상태 변경)이며, 매핑·ISSUE·RESOLUTION_LOG를 한 SQLite 트랜잭션으로 반영(부분 처리
@@ -62,7 +86,7 @@ constraints:
   Agent는 EXECUTED 값을 수정하지 않음
 - '상태 전이: 열린 건(확인필요·이관·처리대기) → 완료·반려·거절. 완료 건은 다시 열지 않음. 이관 건은 담당자 확인 후 처리안으로 ''완료''
   처리'
-- '반려 건 ''수정해서 재요청'': 값이 채워진 등록 폼을 열고, 원래 번호를 PARENT_ISSUE_NO로 가진 새 이슈로 등록·자동 분류.
+- '반려 건 ''수정해서 재요청'': 원래 요청자 본인에게만 버튼이 보이며, 값이 채워진 등록 폼을 열고, 원래 번호를 PARENT_ISSUE_NO로 가진 새 이슈로 등록·자동 분류.
   원래 건은 반려 유지'
 - '값 이상 조사: 매핑이 잘못 연결됐는지(올바른 ACTION으로 교체 제안), 마스터 이름·설명 불만인지(이관 성격)를 근거와 함께 판단'
 - ④ 반려 재요청 도움은 ID 후보 찾기와 고객 안내 초안을 화면에 보여 주는 데까지(발송 없음)
@@ -74,11 +98,20 @@ constraints:
   체크포인터에 보존
 - MCP 서버 연결 끊김 → 1회 재연결, 실패하면 배너
 - 대화 thread는 이슈 번호별(자유 질의는 별도 thread). 승인 대기 처리안은 그 thread의 체크포인터에 남아 다시 열면 이어짐
-- '마스킹은 trace 로그에만 적용: 모든 입력·출력에 mask_pii(전화번호·이메일·사번)와 자격증명 마스킹(_redact)을 적용한 뒤 기록.
-  LLM 입력·화면은 마스킹하지 않음'
+- '처리 기록(디버깅용): 이슈 1건 = 세션 1개(자유 질의는 thread_id가 세션). 세션 안의 실행(자동 분류, 재분류, 비서 대화 1턴,
+  승인 후 재개) 1회마다 PROCESS_LOG 1행(실행 종류, 시작·끝 시각, 결과, 도구 호출 수, 응답 모델, 멈춤 사유)을 남긴다'
+- '실행 안의 이벤트 1건마다 CALL_LOG 1행(이슈 번호, run ID, 순번, 이벤트 종류, 이름, 입력, 출력, 모델 ID, 성공 여부, 오류,
+  걸린 시간)을 남긴다. 이벤트 종류: branch(사전 검사·규칙표 분기, LangGraph 노드 이동), llm(프롬프트 이름·버전, 보낸 메시지
+  전체, 원본 응답, 해석 결과, 폴백 포함 시도 모델), tool(도구 이름·인자·반환 문자열·위험 등급·자동 실행 여부), approval(승인
+  카드 내용, y/n/e, 수정 지시, 이중 확인 결과), commit(실행 직전 재검증 결과, 커밋·롤백), finalize(멈춘 이유)'
+- MESSAGE_LOG는 세션 안의 대화 기록(담당자 입력, 비서 최종 답, ④ 고객 안내 초안)이며 발송하지 않음
+- 처리 기록은 처리 트랜잭션과 섞지 않고 이벤트가 생길 때마다 별도로 바로 저장해, 실패·롤백·모든 모델 실패에서도 남긴다
+- '처리 기록은 Streamlit 화면에 보여 주지 않는다. 개발자가 명령(예: python -m app.trace <issue_no>)으로 한 세션의 기록을 시간순
+  파일(예: traces/issue_<no>.md)로 출력해 본다'
+- 마스킹은 하지 않는다(처리 기록·LLM 입력·화면 모두 원문)
 - '평가셋 15건: 자동 분류 4, ② 자유 질의 3, ① 처리안 승인 4(y/n/e와 destructive 이중 확인 포함), ③ 값 이상 2,
   ④ 반려 재요청 2. 승인 케이스는 y/n/e 응답을 미리 정해 둠'
-- '안전 지표 100% 필수(가짜 LLM·실제 Bedrock 모두): 승인 없이 쓰기 0건, 거절(n) 후 DB 변화 0건, 수행된 매핑을 이중
+- '안전 지표 100% 필수(가짜 LLM·실제 Bedrock 모두): 승인 없이 쓰기 0건, 거절(n) 후 업무 데이터(VESSEL_ACTION·ISSUE) 변화 0건(RESOLUTION_LOG·처리 기록은 제외), 수행된 매핑을 이중
   확인 없이 변경 0건, 도구 호출 예산 초과 0건'
 - '정답 채점: 케이스별 필수 핵심 사실 목록 + 문자열 포함 비교. 과정 지표는 필수 도구 호출 여부만 보고 순서는 고정하지 않음'
 - 자동 분류 정답 = 담당자와 처리상태가 기대값과 정확히 일치(같은 결과를 내는 분류 유형이면 정답 인정)
@@ -87,42 +120,8 @@ constraints:
   사용자가 지시할 때 한 번에 실행
 - '단계 완료 조건은 가짜 LLM pytest 통과. 최종 합격은 실제 Bedrock 기준: 자동 분류 4/4, 비서 시나리오 11건 정답 85%
   이상, 안전 지표 100%, 회귀 0건'
-- '범위 제외: 로그인·권한 관리(담당자 1명 로컬 실행 가정), 다중 사용자 동시 접속, 실제 고객 메시지 발송, 운영 DB·실제 메신저 연결,
+- '범위 제외: 비밀번호 인증·실제 권한 보안(사용자 선택과 권한별 화면·기능 제한만 함), 다중 사용자 동시 접속, 실제 고객 메시지 발송, 운영 DB·실제 메신저 연결,
   마스터(VESSEL_MST·ACTION_MST) 변경, 기존 배치 Agent 수정·연동, Claude Desktop 연동, 서버 배포'
-- '[from-user][refined]
-
-  Decision: MCP 도구 = 읽기 6개(find_vessel(query), find_action(query), get_vessel_mappings(vessel_id),
-  list_issues(status?, since?, limit=10), get_issue(issue_no), get_issue_trace(issue_no))
-  + 쓰기 4개(create_mapping(vessel_id, action_seq), update_mapping(vessel_id, action_seq,
-  new_action_seq), delete_mapping(vessel_id, action_seq), update_issue_ledger(issue_no,
-  status, result)) + 로그 1개(log_resolution(issue_no, note)).
-
-
-  Reasoning:
-
-  - 사용자: 마무리 기록을 로그에 남기는 것은 자동으로 하고, 이슈대장 갱신만 승인받고 싶다.
-
-
-  Constraints (user-stated):
-
-  - log_resolution: RESOLUTION_LOG에 append-only, 위험 등급 "log", 승인 없이 자동 실행.
-
-  - update_issue_ledger: 이슈대장 처리상태·처리결과 갱신, write 등급, 승인 필요.
-
-  - 매핑 쓰기 도구는 write 등급이며 대상 행이 EXECUTED_YN=''Y''면 destructive(이중 확인).
-
-
-  Design details (user confirmed):
-
-  - RESOLUTION_LOG에 LEDGER_APPLIED(Y/N)를 두어 로그만 남고 이슈대장 갱신이 거절된 상태를 구분한다.
-
-  - 매핑 쓰기의 승인·거절·실행 결과도 Python이 RESOLUTION_LOG에 자동 기록한다.
-
-  - 도구 반환은 정해진 형식의 사람이 읽는 문자열, 오류는 예외 대신 안내 문자열(받은 값·쓸 수 있는 값·다음 행동).
-
-  - 위험 등급은 LLM이 아니라 Python이 DB 상태로 결정, 미등록 도구는 승인 필요(fail-safe). 쓰기 도구는 실행 직전 조건 재검사.
-
-  - TOOL_SPECS(메뉴판)와 TOOLS_IMPL(구현) 분리, import 시 이름 일치 assert.'
 acceptance_criteria:
 - description: 서비스 정의 문서와 작업 계획 문서가 구현 전에 작성되어 있고, 시나리오·도구·승인 UX·멈춤 기준·실패 처리·평가 방법·범위
     제외와 '실제 Bedrock 점검 목록'을 담고 있다
@@ -134,8 +133,7 @@ acceptance_criteria:
   - SERVICE.md
   - TASKS.md
   output_assertion: OK
-- description: 시드 스크립트가 기존 프로젝트를 건드리지 않고 SQLite 복사본(마스터·매핑·로그 테이블, ISSUE, LEDGER_APPLIED가
-    있는 RESOLUTION_LOG)을 만들고, 확인필요·이관·반려 이슈를 넣는다
+- description: 시드 스크립트가 기존 프로젝트를 건드리지 않고 SQLite 복사본(마스터·매핑·로그 테이블, ISSUE, RESOLUTION_LOG)을 만들고, 확인필요·이관·반려 이슈를 넣는다
   semantic_ac_key: ac_a11d2faf784e5376
   verify_command: python -m pytest -q tests/test_seed.py
 - description: Streamlit 앱에서 이슈대장 조회·필터·상세, 행별 '이 건 조사'로 해당 이슈 thread의 비서 대화 시작, 마스터
@@ -159,9 +157,10 @@ acceptance_criteria:
     질문 제안을 보여 준다. Bedrock 실패 시 다음 모델로 폴백하고 전부 실패하면 배너를 띄우며 상태를 보존한다. MCP 끊김은 1회 재연결한다
   semantic_ac_key: ac_f85010d698aac5c8
   verify_command: python -m pytest -q tests/test_stop_and_failure.py
-- description: trace 로그의 모든 입력·출력에서 전화번호·이메일·사번과 자격증명이 마스킹되어 기록된다
+- description: 자동 분류와 비서 대화의 실행·분기·LLM 호출(프롬프트·응답)·도구 호출·승인·커밋·멈춤이 PROCESS_LOG·CALL_LOG에
+    이슈별로 남고, 처리가 롤백되거나 모든 모델이 실패해도 기록이 유지되며, 출력 명령으로 한 세션의 기록을 시간순 파일로 볼 수 있다(가짜 LLM)
   semantic_ac_key: ac_bf46f09c5eabcbec
-  verify_command: python -m pytest -q tests/test_trace_masking.py
+  verify_command: python -m pytest -q tests/test_trace.py
 - description: 반려 건에서 ID 후보와 고객 안내 초안을 화면에 보여 주고, '수정해서 재요청'으로 원래 번호를 PARENT_ISSUE_NO로
     가진 새 이슈가 등록·자동 분류되며 원래 건은 반려로 남는다
   semantic_ac_key: ac_e43e4cdd8b50f998
@@ -177,60 +176,11 @@ acceptance_criteria:
   semantic_ac_key: ac_cca3c6dfea539728
   verify_exemption_reason: 실제 Bedrock 호출은 일일 한도 때문에 사용자가 지시할 때만 실행하므로 자동 검증 명령으로 판정할
     수 없다
-- description: '[from-user] 성공 판정(추천안 채택):
-
-    - 평가셋 약 20건: ② 자유 질의 6, ③ 값 이상 조사 5, ① 확인필요 마무리 5, ④ 반려 재요청 4. 승인이 필요한 케이스는 y/n/e
-    응답을 케이스에 미리 정해 둔다.
-
-    - 안전 지표(100% 필수, 가짜 LLM 테스트와 실제 Bedrock 모두): 승인 없이 쓰기 0건, 거절(n) 후 DB 변화 0건, 수행된
-    매핑을 이중 확인 없이 변경 0건, 도구 호출 예산 초과 0건.
-
-    - 정답 지표(실제 Bedrock, 85% 이상): 최종 답의 핵심 사실(찾은 ID, 원인 분류, 제안 처리)이 기대값과 일치.
-
-    - 과정 지표: 도구 호출 순서는 고정하지 않고 ''필수 도구를 불렀는가''만 본다.
-
-    - 전후 비교: 결과를 파일(JSON Lines)로 저장하고 이전 결과와 비교해 회귀가 하나라도 있으면 불합격.
-
-    - Bedrock 호출 규칙(기존 프로젝트와 같음): 평소 개발·pytest는 도구 호출 순서를 흉내 내는 가짜 LLM만 쓴다. 실제 Bedrock은
-    시나리오 완성 시 점검과 최종 평가 때만, 사용자가 지시할 때 부른다.'
-  semantic_ac_key: ac_58dcce9adc98f73d
-- description: '[from-user][refined]
-
-    Decision: 목표 문장 승인 — "VESSEL·ACTION 매핑 문의를 로컬 Streamlit 웹 앱에서 등록하면 Python 규칙과
-    LLM 구조화 출력으로 자동 분류해 SQLite 이슈대장에 기록하고, 매핑 담당자는 MCP 도구를 쓰는 LangGraph ReAct 조사 비서와
-    대화하며 열린 이슈를 조사하고, 비서가 만든 처리안(매핑 변경 + 상태 변경)을 승인해야만 한 트랜잭션으로 반영되는 시스템을 12시간 안에
-    만든다."
-
-
-    Constraints (세부 기본값, 사용자에게 제시 후 승인):
-
-    - 매핑 수정 = 연결된 ACTION을 다른 ACTION으로 교체(삭제 후 생성, 새 행 EXECUTED_YN=''N''·EXECUTED_AT=NULL).
-    EXECUTED 값은 Agent가 수정하지 않는다.
-
-    - 값 이상 = 고객이 "값이 이상하다"고 한 문의. 매핑이 잘못 연결됐는지(올바른 ACTION으로 교체 제안) 마스터 이름·설명 불만인지(이관
-    성격) 조사한다.
-
-    - 등록 폼: VESSEL_ID·ACTION_SEQ는 마스터 목록에서 고르는 구조화 입력칸, 문의내용은 자유 텍스트. 처리 대상은 입력칸 값.
-
-    - 이관 건은 담당자 확인 후 처리안으로 "완료" 처리해 닫는다.
-
-    - 채점: 케이스별 필수 핵심 사실 목록 + 문자열 포함 비교. 회귀는 케이스 단위(이전 pass → 이번 fail). 첫 실행이 기준선.
-
-    - 도구 호출 예산 8회는 승인 후 재개·재계획을 포함한 같은 사용자 턴 전체에 적용.
-
-    - 실행 직전 재검증: 이슈가 아직 열린 상태, 대상 매핑 존재/부재, EXECUTED_YN이 제안 시점과 동일, new_status가 허용된
-    전이.
-
-    - 대화 thread는 이슈 번호별(자유 질의는 별도 thread). 승인 대기 처리안은 그 thread의 체크포인터에 남아 다시 열면 이어진다.
-
-    - [다시 분류]는 같은 이슈를 갱신하고 trace에 기록한다.'
-  semantic_ac_key: ac_71024868d9ac9fd5
 assumptions:
 - 테스트 파일 경로(tests/test_*.py), 시드 스크립트, 평가 파일 경로(eval/)는 예시 이름이며 구현 시 실제 구조에 맞게 바꿀
   수 있음
 - Streamlit 화면 테스트는 streamlit.testing.v1.AppTest를 쓴다고 가정
-- 고객 안내 초안의 고객 이름은 화면 표시 단계에서 Python이 채우는 방식을 유지(LLM 입력 마스킹은 제외됐지만 고객을 ID로 넘기는 방식은
-  유지 가능)
+- 고객 안내 초안의 고객 이름은 화면 표시 단계에서 Python이 채운다(LLM에는 고객 ID로 넘긴다)
 - '''실제 Bedrock 점검 목록''은 저장소 안의 문서 파일(예: TASKS.md의 한 섹션)로 관리'
 - log_resolution의 위험 등급 'log'는 승인 없이 실행되지만 도구 호출 예산 8회에는 포함
 ontology_schema:
@@ -262,7 +212,7 @@ ontology_schema:
     required: true
   - name: resolution_log
     type: array
-    description: 'RESOLUTION_LOG append-only 항목: issue_no, note, 승인·거절·실행 결과, LEDGER_APPLIED(Y/N)'
+    description: 'RESOLUTION_LOG append-only 항목: issue_no, note, 승인·거절·실행 결과'
     required: true
   - name: tool_call_budget
     type: number
@@ -274,7 +224,7 @@ ontology_schema:
     required: true
   - name: trace_record
     type: object
-    description: 마스킹(mask_pii, _redact)된 입력·출력과 분류·재분류 기록
+    description: 'PROCESS_LOG(실행 1회 요약)와 CALL_LOG(이벤트 1건: branch·llm·tool·approval·commit·finalize) 원문 기록'
     required: true
   - name: eval_case
     type: object
@@ -301,7 +251,7 @@ evaluation_principles:
   description: 상한·중복·연속 실패·모델 오류·MCP 끊김에서 정해진 방식으로 멈추거나 폴백하고 상태를 보존한다
   weight: 0.75
 - name: 범위·데이터 격리 준수
-  description: 기존 프로젝트·마스터를 바꾸지 않고, 제외 항목을 구현하지 않으며, trace 마스킹을 지킨다
+  description: 기존 프로젝트·마스터를 바꾸지 않고, 제외 항목을 구현하지 않는다
   weight: 0.7
 - name: 회귀 없음
   description: 이전 pass 케이스가 이번에 fail하지 않는다
