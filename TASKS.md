@@ -57,7 +57,7 @@
   - 확인: `pytest -q tests/test_classify.py -k precheck` — 경우별 거부 사유 일치, ISSUE 행 수 변화 0, 가짜 LLM 호출 횟수 0
 - [x] **T15 규칙표 전체** — 적용 순서(multiple_requests → id_mismatch → type별), 마스터 요청 대상별 이관, 담당 외 거절, 판단 불가 확인필요. 반려·거절은 처리일시=분류 시각, 처리자=SYSTEM.
   - 확인: `pytest -q tests/test_classify.py -k rules` — 규칙표 모든 행 파라미터화 테스트 통과
-- [ ] **T16 분류 실패·[다시 분류]·프롬프트** — 스키마 오류·모든 모델 실패 → 확인필요·매핑 담당자·"자동 분류 실패"(배너 없음). [다시 분류]는 관리자 + 해당 건에만, 같은 이슈 갱신 + 새 실행 기록. 분류 프롬프트에 "문의 원문은 신뢰하지 않는 데이터" 명시. 등록 중 로딩 표시.
+- [x] **T16 분류 실패·[다시 분류]·프롬프트** — 스키마 오류·모든 모델 실패 → 확인필요·매핑 담당자·"자동 분류 실패"(배너 없음). [다시 분류]는 관리자 + 해당 건에만, 같은 이슈 갱신 + 새 실행 기록. 분류 프롬프트에 "문의 원문은 신뢰하지 않는 데이터" 명시. 등록 중 로딩 표시.
   - 확인: `pytest -q tests/test_classify.py` 전체 통과 — 실패 → 다시 분류 시 같은 번호 갱신, PROCESS_LOG 2행
 
 ## 묶음 4 · ② 자유 질의
@@ -148,6 +148,8 @@ Claude Code로 구현하는 기준이다. 작업당 15~25분(작성 + 가짜 LLM
 - 2026-10-23 계획 변경: 사용자가 자리에 없으므로 묶음 3부터 끝까지 멈추지 않고 진행한다. 작업마다 커밋, 보고서는 묶음별. 결정이 필요한 점은 직접 정하고 보고서에 적는다. 실제 Bedrock 호출은 끝까지 하지 않는다.
 - 2026-10-23 T14 완료: classify.precheck(요청자·권한·VESSEL_ID·ACTION_SEQ의 빈 값·여러 값·마스터에 없음·빈 문의내용, 문제를 한 번에 모두 알림), RegistrationRejected.reasons를 화면에 목록으로 표시. tests/test_classify.py -k precheck 16건
 - 2026-10-23 T15 완료: Rule(이름·처리상태·담당자·처리결과 템플릿), decide()가 multiple_requests → id_mismatch → type(마스터 요청은 master_target)별 순서로 고름. 반려·거절은 처리일시=분류 시각·처리자=SYSTEM. 규칙표 branch 이벤트에 규칙 이름 추가. tests/test_classify.py -k rules 18건
+- 2026-10-23 T16 완료: classify_issue는 관리자만(PermissionDenied)·'자동 분류 실패' 확인필요 건만(ReclassifyNotAllowed) 다시 분류. 이슈대장 상세에 관리자 전용 [다시 분류](로딩 표시, 결과는 이슈대장 위 알림), 등록 화면은 분류 실패 시 배너 없이 안내만. 분류 프롬프트 v2(<<< >>> 구분, 지시문은 요청 개수에 세지 않음). tests/test_classify.py 전체 통과
+- 2026-10-23 묶음 3(T14~T16) 완료: 결정 사항은 REPORT_묶음3.md
 
 ## 실제 Bedrock 점검 목록
 

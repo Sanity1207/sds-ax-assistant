@@ -18,8 +18,9 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage  # noqa
 
 from app import config  # noqa: E402
 from app.agent import issue_thread_id, load_messages, run_turn  # noqa: E402
-from app.auth import DEFAULT_USER, can, get_user, selectable_users  # noqa: E402
-from app.classify import RegistrationRejected, register_issue  # noqa: E402
+from app.auth import DEFAULT_USER, PermissionDenied, can, get_user, selectable_users  # noqa: E402
+from app.classify import (FAILED_RESULT, ReclassifyNotAllowed, RegistrationRejected, can_reclassify,  # noqa: E402
+                          classify_issue, register_issue)
 from app.db import STATUSES, connect  # noqa: E402
 from app.llm import LLMError  # noqa: E402
 
@@ -67,6 +68,18 @@ def ledger_rows(statuses: list[str], mine_only: bool, user_id: str) -> list:
     return query(sql + " ORDER BY ISSUE_NO DESC", tuple(params))
 
 
+def reclassify(issue_no: int) -> None:
+    """[다시 분류] 버튼: 같은 이슈를 다시 분류하고 결과를 이슈대장 위에 알린다(분류 중 로딩 표시)."""
+    with st.spinner(f"#{issue_no} 다시 분류 중…"):
+        try:
+            out = classify_issue(issue_no, user_id=st.session_state.current_user)
+        except (PermissionDenied, ReclassifyNotAllowed) as e:
+            st.session_state.flash = ("error", f"다시 분류하지 않았습니다. {e}")
+        else:
+            st.session_state.flash = ("success", f"다시 분류됨 #{out.issue_no}, 처리상태: {out.status}, 처리결과: {out.result}")
+    st.rerun()
+
+
 def show_issue_detail(issue_no: int, admin: bool) -> None:
     """이슈 상세: 모든 칸(이름 포함), 담당자 연락처, 처리 이력(RESOLUTION_LOG). 값은 읽기만 한다."""
     r = query(
@@ -99,11 +112,16 @@ def show_issue_detail(issue_no: int, admin: bool) -> None:
         st.markdown("\n".join(f"- {h['LOGGED_AT']} · {h['KIND']} · {h['USER_ID']} · {h['CONTENT']}" for h in history))
     if admin:
         st.button("이 건 조사", key=f"investigate_{issue_no}", on_click=start_investigation, args=(issue_no,))
+        # [다시 분류]는 관리자에게만, 자동 분류 실패로 확인필요인 건에만 보인다.
+        if can_reclassify(r) and st.button("다시 분류", key=f"reclassify_{issue_no}"):
+            reclassify(issue_no)
 
 
 def page_ledger() -> None:
     """이슈대장: 모든 권한이 읽는다. 값을 직접 고치는 위젯은 없다(변경은 처리안 + 승인으로만)."""
     st.header("이슈대장")
+    if flash := st.session_state.pop("flash", None):
+        getattr(st, flash[0])(flash[1])
     user_id = st.session_state.current_user
     left, right = st.columns([3, 1])
     statuses = left.multiselect("처리상태", STATUSES, key="ledger_status", placeholder="전체")
@@ -148,6 +166,9 @@ def page_register() -> None:
             st.error("등록하지 않았습니다.\n\n" + "\n".join(f"- {r}" for r in e.reasons))
             return
     st.success(f"접수됨 #{out.issue_no}, 처리상태: {out.status}, 처리결과: {out.result}")
+    if out.result == FAILED_RESULT:
+        # 분류 실패는 배너(오류)가 아니라 안내로만 알린다. 문의는 저장됐고 관리자가 [다시 분류]할 수 있다.
+        st.info("자동 분류를 하지 못해 확인필요로 접수했습니다. 매핑 담당자가 확인하거나 이슈대장에서 [다시 분류]할 수 있습니다.")
 
 
 def show_message(message) -> None:

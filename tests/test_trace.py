@@ -37,11 +37,11 @@ def test_record_register_creates_one_run(db_path):
 
     rows = events(conn, run["RUN_ID"])
     assert [(r["EVENT_KIND"], r["NAME"]) for r in rows] == [
-        ("branch", "등록 전 검사"), ("llm", "classify@v1"), ("branch", "규칙표")]
+        ("branch", "등록 전 검사"), ("llm", "classify@v2"), ("branch", "규칙표")]
     assert [r["SEQ"] for r in rows] == [1, 2, 3]
     llm = rows[1]
     sent = json.loads(llm["INPUT"])
-    assert sent["prompt"] == "classify" and sent["version"] == "1"
+    assert sent["prompt"] == "classify" and sent["version"] == "2"
     assert [m["role"] for m in sent["messages"]] == ["system", "human"]
     assert "V003에 104 추가해 주세요" in sent["messages"][1]["content"]
     out = json.loads(llm["OUTPUT"])

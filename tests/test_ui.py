@@ -219,7 +219,9 @@ def test_ledger_has_no_editing_widgets(db_path):
             assert len(at.get(kind)) == 0, (user_id, kind)
         # 표는 읽기 전용(st.dataframe). st.data_editor면 editing_mode가 READ_ONLY가 아니다.
         assert all(df.proto.editing_mode == df.proto.EditingMode.READ_ONLY for df in at.dataframe)
-        assert [b.label for b in at.button if b.label != "이 건 조사"] == []
+        others = [b.key for b in at.button if b.label != "이 건 조사"]
+        # 그 밖의 버튼은 관리자에게만 보이는 [다시 분류](자동 분류 실패 시드 이슈 #6) 하나뿐이다.
+        assert others == (["reclassify_6"] if user_id == "A001" else [])
 
 
 def test_ledger_investigate_only_for_admin(db_path):
@@ -237,3 +239,37 @@ def test_ledger_investigate_opens_issue_thread(db_path):
     assert at.caption[0].value.startswith("이슈 #3 · V003 / 103")
     run = connect().execute("SELECT THREAD_ID, USER_ID FROM PROCESS_LOG").fetchone()
     assert tuple(run) == ("issue-3-A002", "A002")
+
+
+# ---- T16: [다시 분류] ----
+
+from app.classify import FAILED_RESULT  # noqa: E402
+
+
+def test_reclassify_button_only_admin_and_failed(db_path):
+    at = ledger(open_app())
+    assert [b.key for b in at.button if (b.key or "").startswith("reclassify_")] == ["reclassify_6"]
+    for user_id in ("C001", "C005"):
+        assert not [b for b in ledger(open_app(), user_id).button if (b.key or "").startswith("reclassify_")]
+
+
+def test_reclassify_button_updates_same_issue(db_path):
+    at = ledger(open_app())
+    at.button(key="reclassify_6").click().run()  # 데모 가짜 LLM은 늘 '매핑 생성'으로 분류한다
+    assert not at.exception
+    assert at.success[0].value.startswith("다시 분류됨 #6, 처리상태: 처리대기")
+    conn = connect()
+    assert conn.execute("SELECT STATUS FROM ISSUE WHERE ISSUE_NO = 6").fetchone()[0] == "처리대기"
+    assert conn.execute("SELECT COUNT(*) FROM ISSUE").fetchone()[0] == len(ISSUES)
+    run = conn.execute("SELECT RUN_KIND, ISSUE_NO, USER_ID FROM PROCESS_LOG").fetchone()
+    assert tuple(run) == ("다시 분류", 6, "A001")
+    assert not [b for b in at.button if (b.key or "").startswith("reclassify_")]  # 이제 대상이 아니다
+
+
+def test_reclassify_register_failure_shows_info_without_banner(db_path, monkeypatch):
+    from app import fake_llm as fake
+
+    monkeypatch.setattr(fake.DemoChatModel, "structured", lambda self, m, s: (None, "?", "형식 오류"))
+    at = register(open_app(), "V003", "104", "V003에 104 추가")
+    assert at.success[0].value == f"접수됨 #{NEW_NO}, 처리상태: 확인필요, 처리결과: {FAILED_RESULT}"
+    assert "다시 분류" in at.info[0].value and len(at.error) == 0  # 배너 없음
