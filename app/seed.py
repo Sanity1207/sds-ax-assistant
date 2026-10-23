@@ -5,7 +5,7 @@
 
 from pathlib import Path
 
-from app.config import DB_PATH
+from app.config import checkpoint_db_path, db_path
 from app.db import SCHEMA, connect
 
 VESSELS = [
@@ -47,8 +47,9 @@ USERS = [
 ]
 
 
-def init_db(path: Path | str = DB_PATH) -> None:
-    """모든 테이블을 지우고 다시 만든 뒤 시드 값을 넣는다."""
+def init_db(path: Path | str | None = None) -> None:
+    """모든 테이블을 지우고 다시 만든 뒤 시드 값을 넣는다. path를 비우면 config.db_path()."""
+    path = path or db_path()
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     conn = connect(path)
     try:
@@ -74,6 +75,14 @@ def init_db(path: Path | str = DB_PATH) -> None:
         conn.close()
 
 
+def reset_checkpoints(path: Path | str | None = None) -> None:
+    """비서 대화 체크포인터 DB를 지운다. 이슈 번호가 1부터 다시 시작하므로 옛 대화가 새 이슈에 붙지 않게 한다."""
+    path = Path(path or checkpoint_db_path())
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        Path(f"{path}{suffix}").unlink(missing_ok=True)
+
+
 if __name__ == "__main__":
     init_db()
-    print(f"시드 완료: {DB_PATH}")
+    reset_checkpoints()
+    print(f"시드 완료: {db_path()}")

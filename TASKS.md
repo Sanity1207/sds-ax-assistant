@@ -25,17 +25,17 @@
   - 확인: `.venv/Scripts/python -c "import langgraph, mcp, langchain_mcp_adapters, streamlit, dotenv"` 오류 없음, `pytest -q` 가 "no tests ran"으로 정상 종료
 - [x] **T02 최소 DB·시드** — `data/app.db`에 VESSEL_MST·ACTION_MST·VESSEL_ACTION·USER_MST·ISSUE 생성(CHECK·복합 PK·FOREIGN KEY, 연결마다 `PRAGMA foreign_keys = ON`), seed.yaml의 마스터·매핑·사용자 값(SYSTEM 포함) 투입, 재실행 시 초기화. ISSUE의 요청자·처리자·VESSEL_ID·ACTION_SEQ·PARENT_ISSUE_NO는 FOREIGN KEY, VESSEL_ID·ACTION_SEQ는 NOT NULL. 시드 이슈·로그 테이블은 T09.
   - 확인: `pytest -q tests/test_seed.py` — 건수 5/6/7/8, EXECUTED_YN='Y'인데 EXECUTED_AT NULL인 행 INSERT 시 실패, 마스터에 없는 값·빈 값·없는 요청자로 ISSUE INSERT 시 실패
-- [ ] **T03 LLM 호출 래퍼 + 가짜 LLM** — `BEDROCK_MODEL_IDS` 순서대로 시도, temperature 0, 호출당 60초 제한, 재시도 없이 다음 모델, 응답 모델 ID 반환. 같은 인터페이스의 가짜 LLM(정해진 응답·도구 호출 순서를 흉내).
+- [x] **T03 LLM 호출 래퍼 + 가짜 LLM** — `BEDROCK_MODEL_IDS` 순서대로 시도, temperature 0, 호출당 60초 제한, 재시도 없이 다음 모델, 응답 모델 ID 반환. 같은 인터페이스의 가짜 LLM(정해진 응답·도구 호출 순서를 흉내).
   - 확인: `pytest -q tests/test_llm.py` — 가짜 1순위 예외 → 2순위 응답, 반환된 모델 ID가 2순위
-- [ ] **T04 자동 분류 최소판** — 분류 출력 스키마(type·master_target·multiple_requests·id_mismatch·reason), 구조화 출력 1회, "매핑 생성 → 처리대기·매핑 담당자" 한 규칙, 처리결과 = 템플릿 + 근거 한 줄, ISSUE INSERT. 매핑은 건드리지 않음.
+- [x] **T04 자동 분류 최소판** — 분류 출력 스키마(type·master_target·multiple_requests·id_mismatch·reason), 구조화 출력 1회, "매핑 생성 → 처리대기·매핑 담당자" 한 규칙, 처리결과 = 템플릿 + 근거 한 줄, ISSUE INSERT. 매핑은 건드리지 않음.
   - 확인: `pytest -q tests/test_classify.py -k skeleton` — 가짜 LLM으로 등록 → ISSUE 1행(처리대기·매핑 담당자), VESSEL_ACTION 변화 0
-- [ ] **T05 MCP 서버 최소판** — FastMCP stdio 서버, `find_vessel(query)` 1개. `TOOL_SPECS`와 `TOOLS_IMPL` 분리, import 시 이름 일치 assert.
+- [x] **T05 MCP 서버 최소판** — FastMCP stdio 서버, `find_vessel(query)` 1개. `TOOL_SPECS`와 `TOOLS_IMPL` 분리, import 시 이름 일치 assert.
   - 확인: `pytest -q tests/test_mcp.py` — stdio 클라이언트로 도구 목록에 find_vessel, `find_vessel("혼합")` 결과에 V003
-- [ ] **T06 비서 그래프 최소판** — LangGraph로 agent↔tools 순환 직접 조립, `should_stop`, `finalize` 자리(지금은 통과), `add_messages` + 체크포인터, langchain-mcp-adapters로 T05 도구 로드.
+- [x] **T06 비서 그래프 최소판** — LangGraph로 agent↔tools 순환 직접 조립, `should_stop`, `finalize` 자리(지금은 통과), `add_messages` + 체크포인터, langchain-mcp-adapters로 T05 도구 로드.
   - 확인: `pytest -q tests/test_agent_read.py -k skeleton` — 가짜 LLM이 find_vessel 호출 후 "V003"이 든 최종 답변, 같은 thread 두 번째 입력에서 이전 메시지 유지
-- [ ] **T07 Streamlit 최소 화면** — 사용자 A001 고정. 등록 폼(VESSEL_ID·ACTION_SEQ 마스터 드롭다운, 문의내용) → "접수됨 #번호, 처리상태, 처리결과" 표시, 이슈대장 표, 행별 [이 건 조사] → 대화창 → 비서 답변.
+- [x] **T07 Streamlit 최소 화면** — 사용자 A001 고정. 등록 폼(VESSEL_ID·ACTION_SEQ 마스터 드롭다운, 문의내용) → "접수됨 #번호, 처리상태, 처리결과" 표시, 이슈대장 표, 행별 [이 건 조사] → 대화창 → 비서 답변.
   - 확인: `pytest -q tests/test_ui.py -k skeleton`(AppTest, 가짜 LLM) — 등록 후 표에 새 행, [이 건 조사] 후 답변 메시지 표시
-- [ ] **T08 최소 경로 종단 테스트** — 등록 → 분류 → 조사 → 답변을 한 테스트로 묶고, 실제 Bedrock 점검 목록에 "최소 경로 실연" 항목 추가.
+- [x] **T08 최소 경로 종단 테스트** — 등록 → 분류 → 조사 → 답변을 한 테스트로 묶고, 실제 Bedrock 점검 목록에 "최소 경로 실연" 항목 추가.
   - 확인: `pytest -q tests/test_skeleton.py` 통과 + `streamlit run app/main.py`로 같은 경로를 손으로 1회 통과(가짜 LLM 모드)
 
 ## 묶음 2 · ⓪ 기반 완성 (DB·시드·사용자 선택·이슈대장·처리 기록)
@@ -138,12 +138,14 @@ Claude Code로 구현하는 기준이다. 작업당 15~25분(작성 + 가짜 LLM
 - (완료한 작업, 축소·연기한 작업, 남은 작업을 여기에 적는다)
 - 2026-10-23 T01 완료: requirements.txt 설치(pip check 이상 없음), 폴더 골격, app/config.py(.env 로딩, BEDROCK_MODEL_IDS 10개 확인)
 - 2026-10-23 T02 완료: app/db.py(스키마·connect), app/seed.py(python -m app.seed, 재실행 시 초기화), tests/test_seed.py 25건 통과. 사용자 요청으로 ISSUE ID 칸 FOREIGN KEY·NOT NULL, SYSTEM 사용자 추가, 유효하지 않은 등록은 저장 안 함(seed.yaml·T09·T12·T14 반영)
+- 2026-10-23 묶음 1(T03~T08) 완료: app/llm.py(FallbackLLM·BedrockChatModel), app/fake_llm.py, app/classify.py, app/tools.py·app/mcp_server.py, app/agent.py, app/main.py, 테스트 6개 파일. pytest 전체 53건 통과. 구현 시간은 약 15분으로 예상(약 3시간)보다 훨씬 짧았다. 남은 묶음의 예상은 그대로 두고 축소 판단은 하지 않는다. T08의 "손으로 1회 통과"는 사용자 확인으로 남겼다(서버 기동·health 응답과 AppTest 경로는 확인함). 결정 사항은 REPORT_묶음1.md
 
 ## 실제 Bedrock 점검 목록
 
 사용자가 지시할 때 한 번에 실행한다. 작업 중 실제 Bedrock 확인이 필요해지면 여기에 추가한다.
 
-- [ ] 최소 경로 실연: 문의 등록 → 분류 → [이 건 조사] → 답변 (T08)
+- [ ] 최소 경로 실연: `.env`에 `LLM_MODE=bedrock`을 넣고 `streamlit run app/main.py`로 문의 등록 → 분류 → [이 건 조사] → 답변 (T08)
+- [ ] 분류 응답에서 master_target을 영어(BOTH·UNKNOWN)나 문자열 "null"로 보내는 모델이 있는지, 정규화로 통과하는지 (T04)
 - [ ] `BEDROCK_MODEL_IDS` 각 모델이 구조화 출력(분류 스키마)을 지원하는지 (T03·T04)
 - [ ] 각 모델이 도구 바인딩(ReAct)을 지원하는지, 60초 제한 안에 응답하는지 (T03·T06)
 - [ ] 1순위 모델 ID를 일부러 틀리게 해 2순위로 폴백되는지 (T03)

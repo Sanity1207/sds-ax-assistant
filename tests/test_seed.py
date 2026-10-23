@@ -130,3 +130,14 @@ def test_reseed_resets(tmp_path):
 
 def test_foreign_keys_on_every_connection(db):
     assert db.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+
+
+def test_reset_checkpoints(tmp_path):
+    from app.seed import reset_checkpoints
+
+    path = tmp_path / "checkpoints.db"
+    path.write_bytes(b"x")
+    (tmp_path / "checkpoints.db-wal").write_bytes(b"x")
+    reset_checkpoints(path)
+    reset_checkpoints(path)  # 없어도 오류 없음
+    assert list(tmp_path.iterdir()) == []

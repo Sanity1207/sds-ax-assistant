@@ -3,7 +3,7 @@
 import sqlite3
 from pathlib import Path
 
-from app.config import DB_PATH
+from app.config import db_path
 
 STATUSES = ("확인필요", "이관", "처리대기", "완료", "반려", "거절")
 OWNER_ROLES = ("", "매핑 담당자", "VESSEL 담당자", "ACTION 담당자", "VESSEL 담당자, ACTION 담당자")
@@ -62,8 +62,9 @@ CREATE TABLE ISSUE (
 """
 
 
-def connect(path: Path | str = DB_PATH) -> sqlite3.Connection:
-    conn = sqlite3.connect(path)
+def connect(path: Path | str | None = None) -> sqlite3.Connection:
+    """path를 비우면 config.db_path()(APP_DB_PATH 또는 data/app.db)를 연다."""
+    conn = sqlite3.connect(path or db_path())
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
