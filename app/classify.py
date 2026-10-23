@@ -10,6 +10,7 @@
 분류 LLM 호출은 llm 이벤트로 남는다. 업무 쓰기(INSERT·UPDATE)는 짧은 트랜잭션으로 하고, 기록은 그 앞뒤에 한다.
 """
 
+import re
 import sqlite3
 from dataclasses import dataclass
 from typing import Literal
@@ -89,7 +90,54 @@ FAILED_RESULT = "자동 분류 실패"
 
 
 class RegistrationRejected(Exception):
-    """등록 전 검사에서 거부됐다. ISSUE는 저장하지 않았다. 메시지가 화면에 보여 줄 사유다."""
+    """등록 전 검사에서 거부됐다. ISSUE는 저장하지 않았다. reasons가 화면에 보여 줄 사유(받은 값·고를 수 있는 값)다."""
+
+    def __init__(self, reasons: list[str]):
+        super().__init__(" / ".join(reasons))
+        self.reasons = reasons
+
+
+# 한 칸에 값이 여러 개인지 보는 구분자(쉼표·세미콜론·슬래시·공백·줄바꿈).
+_SEPARATORS = re.compile(r"[,;/\s]+")
+
+
+def _field_problem(label: str, value, table: str, key: str, name: str, conn: sqlite3.Connection) -> str | None:
+    """입력칸 하나 검사: 빈 값·여러 값·마스터에 없음이면 사유 문장, 문제없으면 None."""
+    choices = ", ".join(f"{r[0]} {r[1]}" for r in conn.execute(f"SELECT {key}, {name} FROM {table} ORDER BY {key}"))
+    if isinstance(value, (list, tuple, set)):
+        values = [str(v).strip() for v in value if str(v).strip()]
+        if len(values) > 1:
+            return f"{label} 칸에 값이 여러 개입니다(받은 값: {', '.join(values)}). 값은 하나만 고르세요. 고를 수 있는 값: {choices}"
+        value = values[0] if values else ""
+    text = "" if value is None else str(value).strip()
+    if not text:
+        return f"{label} 칸이 비어 있습니다. 고를 수 있는 값: {choices}"
+    parts = [p for p in _SEPARATORS.split(text) if p]
+    if len(parts) > 1:
+        return f"{label} 칸에 값이 여러 개입니다(받은 값: '{text}'). 값은 하나만 고르세요. 고를 수 있는 값: {choices}"
+    if conn.execute(f"SELECT 1 FROM {table} WHERE {key} = ?", (text,)).fetchone() is None:
+        return f"{label} 칸의 값 '{text}'는 {table}에 없습니다. 고를 수 있는 값: {choices}"
+    return None
+
+
+def precheck(requester_id, vessel_id, action_seq, inquiry, conn: sqlite3.Connection) -> list[str]:
+    """등록 전 Python 검사. 문제가 있으면 사유 문장 목록(모든 문제를 한 번에), 없으면 빈 목록. LLM은 부르지 않는다.
+
+    폼에서는 생길 수 없는 경우(요청자 없음·여러 값·마스터에 없음)도 검사한다. 등록 함수를 직접 부르는 평가·테스트
+    입력을 막는 방어선이고, DB의 FOREIGN KEY·NOT NULL이 마지막 방어선이다.
+    """
+    reasons = []
+    try:
+        require(str(requester_id or ""), "register", conn)
+    except PermissionDenied as e:
+        reasons.append(str(e))
+    for label, value, table, key, name in (("VESSEL_ID", vessel_id, "VESSEL_MST", "VESSEL_ID", "VESSEL_NAME"),
+                                           ("ACTION_SEQ", action_seq, "ACTION_MST", "ACTION_SEQ", "ACTION_DESCRIPTION")):
+        if problem := _field_problem(label, value, table, key, name, conn):
+            reasons.append(problem)
+    if not str(inquiry or "").strip():
+        reasons.append("문의내용이 비어 있습니다. 요청 내용을 적어 주세요.")
+    return reasons
 
 
 @dataclass
@@ -128,8 +176,8 @@ def register_issue(requester_id: str, vessel_id: str, action_seq: str, inquiry: 
                    llm: FallbackLLM | None = None, conn: sqlite3.Connection | None = None) -> ClassifyOutcome:
     """문의를 ISSUE에 저장하고 바로 자동 분류한다.
 
-    등록 전 검사: 요청자가 없거나 등록 권한(요청 고객·관리자)이 없으면 저장하지 않고 RegistrationRejected.
-    칸 검사(빈 값·여러 값·마스터에 없음)는 T14에서 더하고, 그때까지는 DB 제약이 막는다.
+    등록 전 검사(precheck): 요청자가 없거나 등록 권한(요청 고객·관리자)이 없거나, VESSEL_ID·ACTION_SEQ가
+    빈 값·여러 값·마스터에 없음이면 저장하지 않고 RegistrationRejected. 처리 기록에는 ISSUE_NO 없이 '등록 거부' 실행.
     """
     own = conn is None
     conn = conn or connect()
@@ -137,13 +185,13 @@ def register_issue(requester_id: str, vessel_id: str, action_seq: str, inquiry: 
         with start_run("문의 등록", "SYSTEM") as run:
             submitted = {"requester_id": requester_id, "vessel_id": vessel_id, "action_seq": action_seq,
                          "inquiry": inquiry}
-            try:
-                require(requester_id, "register", conn)
-            except PermissionDenied as e:
-                run.event("branch", "등록 전 검사", submitted, f"거부: {e}")
+            reasons = precheck(requester_id, vessel_id, action_seq, inquiry, conn)
+            if reasons:
+                run.event("branch", "등록 전 검사", submitted, "거부: " + " / ".join(reasons))
                 run.finish("등록 거부")
-                raise RegistrationRejected(str(e)) from None
+                raise RegistrationRejected(reasons)
             run.event("branch", "등록 전 검사", submitted, "통과")
+            vessel_id, action_seq, inquiry = _one(vessel_id), _one(action_seq), str(inquiry).strip()
             with conn:
                 # 분류가 끝나기 전에 앱이 멈춰도 [다시 분류]로 이어갈 수 있도록 '자동 분류 실패' 확인필요로 먼저 저장한다.
                 issue_no = conn.execute(
@@ -157,6 +205,13 @@ def register_issue(requester_id: str, vessel_id: str, action_seq: str, inquiry: 
     finally:
         if own:
             conn.close()
+
+
+def _one(value) -> str:
+    """검사를 통과한 칸 값(목록이면 값 하나)을 문자열로."""
+    if isinstance(value, (list, tuple, set)):
+        value = next(str(v).strip() for v in value if str(v).strip())
+    return str(value).strip()
 
 
 def classify_issue(issue_no: int, llm: FallbackLLM | None = None, conn: sqlite3.Connection | None = None,

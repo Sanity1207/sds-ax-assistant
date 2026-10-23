@@ -68,3 +68,65 @@ def test_skeleton_master_target_aliases():
     c = Classification.model_validate(dict(CREATE, type="마스터 요청", master_target="BOTH"))
     assert c.master_target == "둘 다"
     assert Classification.model_validate(dict(CREATE, master_target="null")).master_target is None
+
+
+# ---- T14: 등록 전 Python 검사 ----
+
+import pytest  # noqa: E402
+
+from app.classify import RegistrationRejected, precheck  # noqa: E402
+
+VESSEL_CHOICES = "고를 수 있는 값: V001 반응기 A, V002 반응기 B, V003 혼합탱크 1, V004 저장탱크 1, V005 세정조 1"
+ACTION_CHOICES = "고를 수 있는 값: 101 원료 투입, 102 가열, 103 교반, 104 냉각, 105 배출, 106 세정"
+
+
+@pytest.mark.parametrize("requester, vessel, action, inquiry, expected", [
+    ("X999", "V003", "104", "추가", ["사용자 'X999'가 USER_MST에 없습니다."]),
+    ("", "V003", "104", "추가", ["사용자 ''가 USER_MST에 없습니다."]),
+    ("C005", "V003", "104", "추가", ["정하늘(C005, 조회 고객)에게는 문의 등록 권한이 없습니다."]),
+    ("SYSTEM", "V003", "104", "추가", ["시스템(SYSTEM, 시스템)에게는 문의 등록 권한이 없습니다."]),
+    ("C001", "", "104", "추가", [f"VESSEL_ID 칸이 비어 있습니다. {VESSEL_CHOICES}"]),
+    ("C001", None, "104", "추가", [f"VESSEL_ID 칸이 비어 있습니다. {VESSEL_CHOICES}"]),
+    ("C001", "V003", "  ", "추가", [f"ACTION_SEQ 칸이 비어 있습니다. {ACTION_CHOICES}"]),
+    ("C001", "V003,V004", "104", "추가",
+     [f"VESSEL_ID 칸에 값이 여러 개입니다(받은 값: 'V003,V004'). 값은 하나만 고르세요. {VESSEL_CHOICES}"]),
+    ("C001", "V003", "103 104", "추가",
+     [f"ACTION_SEQ 칸에 값이 여러 개입니다(받은 값: '103 104'). 값은 하나만 고르세요. {ACTION_CHOICES}"]),
+    ("C001", ["V003", "V004"], "104", "추가",
+     [f"VESSEL_ID 칸에 값이 여러 개입니다(받은 값: V003, V004). 값은 하나만 고르세요. {VESSEL_CHOICES}"]),
+    ("C001", "V009", "104", "추가", [f"VESSEL_ID 칸의 값 'V009'는 VESSEL_MST에 없습니다. {VESSEL_CHOICES}"]),
+    ("C001", "V003", "999", "추가", [f"ACTION_SEQ 칸의 값 '999'는 ACTION_MST에 없습니다. {ACTION_CHOICES}"]),
+    ("C001", "v003", "104", "추가", [f"VESSEL_ID 칸의 값 'v003'는 VESSEL_MST에 없습니다. {VESSEL_CHOICES}"]),
+    ("C001", "V003", "104", "   ", ["문의내용이 비어 있습니다. 요청 내용을 적어 주세요."]),
+    # 문제가 여러 개면 한 번에 모두 알려 준다.
+    ("C005", "", "999", "추가", ["정하늘(C005, 조회 고객)에게는 문의 등록 권한이 없습니다.",
+                               f"VESSEL_ID 칸이 비어 있습니다. {VESSEL_CHOICES}",
+                               f"ACTION_SEQ 칸의 값 '999'는 ACTION_MST에 없습니다. {ACTION_CHOICES}"]),
+])
+def test_precheck_rejects(db_path, requester, vessel, action, inquiry, expected):
+    conn = connect()
+    before = conn.execute("SELECT COUNT(*) FROM ISSUE").fetchone()[0]
+    model = FakeChatModel("fake-1", [CREATE])
+    with pytest.raises(RegistrationRejected) as info:
+        register_issue(requester, vessel, action, inquiry, fake_llm(model), conn)
+    reasons = info.value.reasons
+    # 권한 사유 문장 끝의 '가능한 권한: …'은 비교에서 뺀다.
+    assert [r.split(" 가능한 권한:")[0] for r in reasons] == expected
+    assert conn.execute("SELECT COUNT(*) FROM ISSUE").fetchone()[0] == before  # 저장하지 않음
+    assert model.calls == []  # LLM 호출 0
+    run = conn.execute("SELECT * FROM PROCESS_LOG").fetchone()
+    assert (run["RUN_KIND"], run["RESULT"], run["ISSUE_NO"], run["USER_ID"]) == ("문의 등록", "등록 거부", None, "SYSTEM")
+    [event] = conn.execute("SELECT * FROM CALL_LOG WHERE RUN_ID = ?", (run["RUN_ID"],)).fetchall()
+    assert (event["EVENT_KIND"], event["NAME"]) == ("branch", "등록 전 검사")
+    assert event["OUTPUT"].startswith("거부: ") and expected[0] in event["OUTPUT"]
+    conn.close()
+
+
+def test_precheck_passes_valid_input(db_path):
+    conn = connect()
+    assert precheck("C001", "V003", "104", "V003에 104 추가", conn) == []
+    assert precheck("A001", " V003 ", ["104"], "추가", conn) == []  # 앞뒤 공백·값 하나짜리 목록은 통과
+    out = register_issue("A001", " V003 ", ["104"], " 추가 ", fake_llm(FakeChatModel("f", [CREATE])), conn)
+    row = conn.execute("SELECT VESSEL_ID, ACTION_SEQ, INQUIRY FROM ISSUE WHERE ISSUE_NO = ?", (out.issue_no,)).fetchone()
+    assert tuple(row) == ("V003", "104", "추가")
+    conn.close()

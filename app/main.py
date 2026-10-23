@@ -145,7 +145,7 @@ def page_register() -> None:
         try:
             out = register_issue(user_id, vessel_id, action_seq, inquiry.strip())
         except RegistrationRejected as e:
-            st.error(f"등록하지 않았습니다. {e}")
+            st.error("등록하지 않았습니다.\n\n" + "\n".join(f"- {r}" for r in e.reasons))
             return
     st.success(f"접수됨 #{out.issue_no}, 처리상태: {out.status}, 처리결과: {out.result}")
 

@@ -53,7 +53,7 @@
 
 ## 묶음 3 · Ⓐ 신규 등록·자동 분류 완성
 
-- [ ] **T14 등록 전 Python 검사** — 요청자 없음·등록 권한 없음·칸 문제(빈 값·여러 값·마스터에 없음)면 ISSUE를 저장하지 않고 거부, 화면에 사유(받은 값·고를 수 있는 값) 표시, 처리 기록에 ISSUE_NO 없이 "등록 거부" 실행 1건. LLM 호출 안 함.
+- [x] **T14 등록 전 Python 검사** — 요청자 없음·등록 권한 없음·칸 문제(빈 값·여러 값·마스터에 없음)면 ISSUE를 저장하지 않고 거부, 화면에 사유(받은 값·고를 수 있는 값) 표시, 처리 기록에 ISSUE_NO 없이 "등록 거부" 실행 1건. LLM 호출 안 함.
   - 확인: `pytest -q tests/test_classify.py -k precheck` — 경우별 거부 사유 일치, ISSUE 행 수 변화 0, 가짜 LLM 호출 횟수 0
 - [ ] **T15 규칙표 전체** — 적용 순서(multiple_requests → id_mismatch → type별), 마스터 요청 대상별 이관, 담당 외 거절, 판단 불가 확인필요. 반려·거절은 처리일시=분류 시각, 처리자=SYSTEM.
   - 확인: `pytest -q tests/test_classify.py -k rules` — 규칙표 모든 행 파라미터화 테스트 통과
@@ -145,6 +145,8 @@ Claude Code로 구현하는 기준이다. 작업당 15~25분(작성 + 가짜 LLM
 - 2026-10-23 T12 완료: app/auth.py(권한표·require), 오른쪽 위 사용자 드롭다운(SYSTEM 제외, 시작 A001), 권한별 메뉴·[이 건 조사] 제한, register_issue는 권한 없으면 저장 없이 RegistrationRejected('등록 거부' 실행 기록), run_turn은 관리자 아니면 PermissionDenied. 승인 함수의 재확인은 승인 함수를 만드는 T25에서 같은 require로 붙인다. tests/test_ui.py -k role 10건
 - 2026-10-23 T13 완료: 처리상태 다중 선택·'내 요청만' 필터, 행마다 펼치는 상세(이름·담당자 연락처·처리 이력)와 관리자 전용 [이 건 조사], 편집 위젯 없음(st.dataframe 읽기 전용). tests/test_ui.py -k ledger 10건
 - 2026-10-23 묶음 2(T09~T13) 완료: pytest 전체 통과, 결정 사항은 REPORT_묶음2.md
+- 2026-10-23 계획 변경: 사용자가 자리에 없으므로 묶음 3부터 끝까지 멈추지 않고 진행한다. 작업마다 커밋, 보고서는 묶음별. 결정이 필요한 점은 직접 정하고 보고서에 적는다. 실제 Bedrock 호출은 끝까지 하지 않는다.
+- 2026-10-23 T14 완료: classify.precheck(요청자·권한·VESSEL_ID·ACTION_SEQ의 빈 값·여러 값·마스터에 없음·빈 문의내용, 문제를 한 번에 모두 알림), RegistrationRejected.reasons를 화면에 목록으로 표시. tests/test_classify.py -k precheck 16건
 
 ## 실제 Bedrock 점검 목록
 
