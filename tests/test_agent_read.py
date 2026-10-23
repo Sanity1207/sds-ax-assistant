@@ -25,7 +25,7 @@ def test_skeleton_find_vessel_then_answer(db_path):
     assert first.tool_calls_used == 1
     assert first.model_id == "fake-1"
     # 첫 LLM 호출에 도구가 바인딩되고, 두 번째 호출은 도구 결과를 본다.
-    assert [t.name for t in model.calls[0][2]] == ["find_vessel"]
+    assert "find_vessel" in [t.name for t in model.calls[0][2]]
     assert isinstance(model.calls[1][1][-1], ToolMessage)
 
     second = asyncio.run(run_turn("t-1", "방금 그 ID 다시 알려줘", llm, user_id="A001"))

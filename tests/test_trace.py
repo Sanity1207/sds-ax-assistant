@@ -128,7 +128,7 @@ def test_record_chat_turn(db_path):
     tool = rows[2]
     assert json.loads(tool["INPUT"]) == {"args": {"query": "혼합"}, "risk": "read", "auto_run": True}
     assert "V003 혼합탱크 1" in tool["OUTPUT"] and tool["SUCCESS"] == "Y"
-    assert json.loads(rows[0]["INPUT"])["tools"] == ["find_vessel"]
+    assert "find_vessel" in json.loads(rows[0]["INPUT"])["tools"]
     assert rows[-1]["OUTPUT"] == "답변 완료"
 
     messages = conn.execute("SELECT SEQ, SPEAKER, CONTENT FROM MESSAGE_LOG ORDER BY SEQ").fetchall()

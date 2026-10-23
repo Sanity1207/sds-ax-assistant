@@ -62,7 +62,7 @@
 
 ## 묶음 4 · ② 자유 질의
 
-- [ ] **T17 읽기 도구 6개 완성** — find_vessel·find_action(일부 검색, 빈 검색어 = 전체+개수), get_vessel_mappings(빈 값 = 전체), list_issues, get_issue, get_issue_trace. 정해진 형식 문자열, 오류는 `[오류]`로 시작하는 안내(받은 값·쓸 수 있는 값·다음 행동). 검색 0건은 정상.
+- [x] **T17 읽기 도구 6개 완성** — find_vessel·find_action(일부 검색, 빈 검색어 = 전체+개수), get_vessel_mappings(빈 값 = 전체), list_issues, get_issue, get_issue_trace. 정해진 형식 문자열, 오류는 `[오류]`로 시작하는 안내(받은 값·쓸 수 있는 값·다음 행동). 검색 0건은 정상.
   - 확인: `pytest -q tests/test_mcp.py` — 도구별 정상·오류 사례, TOOL_SPECS/TOOLS_IMPL 이름 일치
 - [ ] **T18 대화 모드·thread·첫 질문** — log_resolution 추가. 모드별 도구 목록(열린 이슈 / 닫힌 이슈 / 이슈 없음)을 Python이 결정. thread ID 규칙((이슈, 관리자), `free-<관리자>-<YYYYMMDD-HHMMSS>`, [새 대화]). 열린 이슈 진입 시 y/n 첫 질문(Python 판정, 그 밖 입력은 다시 묻기).
   - 확인: `pytest -q tests/test_agent_read.py -k mode` — 모드별 바인딩 도구 이름 집합 일치, "네"/"yes" 입력 시 다시 묻기
@@ -150,6 +150,7 @@ Claude Code로 구현하는 기준이다. 작업당 15~25분(작성 + 가짜 LLM
 - 2026-10-23 T15 완료: Rule(이름·처리상태·담당자·처리결과 템플릿), decide()가 multiple_requests → id_mismatch → type(마스터 요청은 master_target)별 순서로 고름. 반려·거절은 처리일시=분류 시각·처리자=SYSTEM. 규칙표 branch 이벤트에 규칙 이름 추가. tests/test_classify.py -k rules 18건
 - 2026-10-23 T16 완료: classify_issue는 관리자만(PermissionDenied)·'자동 분류 실패' 확인필요 건만(ReclassifyNotAllowed) 다시 분류. 이슈대장 상세에 관리자 전용 [다시 분류](로딩 표시, 결과는 이슈대장 위 알림), 등록 화면은 분류 실패 시 배너 없이 안내만. 분류 프롬프트 v2(<<< >>> 구분, 지시문은 요청 개수에 세지 않음). tests/test_classify.py 전체 통과
 - 2026-10-23 묶음 3(T14~T16) 완료: 결정 사항은 REPORT_묶음3.md
+- 2026-10-23 T17 완료: find_action·get_vessel_mappings·list_issues·get_issue·get_issue_trace 추가, 오류는 error()로 '[오류] 사유 · 받은 값 · 쓸 수 있는 값 · 다음 행동' 형식. issue_no는 정수·'#2'·'2'를 받고 그 밖은 안내. tests/test_mcp.py 29건
 
 ## 실제 Bedrock 점검 목록
 
