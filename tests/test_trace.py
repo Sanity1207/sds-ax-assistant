@@ -170,3 +170,86 @@ def test_record_thread_id_parsing():
 def test_record_run_needs_user():
     with pytest.raises(ValueError, match="사용자"):
         asyncio.run(run_turn("t-1", "안녕"))
+
+
+# ---- T11: 처리 기록 출력 명령 ----
+
+from app.trace import SEED_NO_TRACE, export_issue, export_thread, list_sessions, main  # noqa: E402
+
+
+def make_session():
+    """새 이슈 등록(자동 분류) → A001·A002가 각자 그 이슈를 조사 → A001의 이슈 없는 대화."""
+    register_issue("C001", "V003", "104", "V003에 104 추가해 주세요", fake_llm(FakeChatModel("fake-1", [CREATE])))
+    for user in ("A001", "A002"):
+        model = FakeChatModel("fake-1", [tool_call("find_vessel", {"query": "V003"}), AIMessage(f"{user}: V003입니다.")])
+        asyncio.run(run_turn(issue_thread_id(NEW_NO, user), "조사해 줘", fake_llm(model)))
+    free = free_thread_id("A001")
+    asyncio.run(run_turn(free, f"이슈 #{NEW_NO} 상태 알려줘", fake_llm(FakeChatModel("f", [AIMessage("처리대기입니다.")]))))
+    return free
+
+
+def headings(text):
+    return [line for line in text.splitlines() if line.startswith("### ")]
+
+
+def test_export_issue_file_in_time_order(db_path, tmp_path):
+    free = make_session()
+    path = export_issue(NEW_NO, tmp_path)
+    assert path == tmp_path / f"issue_{NEW_NO}.md"
+    text = path.read_text(encoding="utf-8")
+    heads = headings(text)
+    times = [h.split(" · ")[0].removeprefix("### ") for h in heads]
+    assert times == sorted(times)
+    # 이벤트마다 thread·사용자가 붙는다.
+    assert all(" · thread " in h and " · 사용자 " in h for h in heads)
+    # 자동 분류 실행이 먼저, 그 뒤 A001·A002의 대화. 이슈 없는 대화는 이 세션에 들어가지 않는다.
+    assert "[branch] 등록 전 검사 · thread - · 사용자 SYSTEM" in heads[0]
+    assert any(f"thread issue-{NEW_NO}-A001 · 사용자 A001" in h for h in heads)
+    assert any(f"thread issue-{NEW_NO}-A002 · 사용자 A002" in h for h in heads)
+    assert free not in text
+    first_a001 = next(i for i, h in enumerate(heads) if "사용자 A001" in h)
+    first_a002 = next(i for i, h in enumerate(heads) if "사용자 A002" in h)
+    assert max(i for i, h in enumerate(heads) if "사용자 SYSTEM" in h) < first_a001 < first_a002
+    assert "## 실행 3회" in text and "[말] 비서" in text and "A002: V003입니다." in text
+
+
+def test_export_order_uses_sequence_within_same_second(db_path, tmp_path):
+    """같은 초에 생긴 이벤트·말은 순번으로 정렬된다(관리자 말 → llm → … → 비서 말)."""
+    make_session()
+    text = export_thread(issue_thread_id(NEW_NO, "A001"), tmp_path).read_text(encoding="utf-8")
+    kinds = [h.split(" · ")[1] for h in headings(text)]
+    assert kinds == ["[말] 관리자", "[llm] assistant@v1", "[branch] should_stop", "[tool] find_vessel",
+                     "[llm] assistant@v1", "[branch] should_stop", "[finalize] finalize", "[말] 비서"]
+
+
+def test_export_thread_file(db_path, tmp_path):
+    free = make_session()
+    path = export_thread(free, tmp_path)
+    assert path.name == f"thread_{free}.md"
+    text = path.read_text(encoding="utf-8")
+    assert "## 실행 1회" in text and "처리대기입니다." in text and "사용자 A001" in text
+
+
+def test_export_seed_issue_has_no_trace(db_path, tmp_path):
+    text = export_issue(2, tmp_path).read_text(encoding="utf-8")
+    assert SEED_NO_TRACE in text and "### " not in text
+
+
+def test_export_list_sessions(db_path):
+    free = make_session()
+    out = list_sessions()
+    lines = out.splitlines()[1:]
+    assert lines[0].startswith(f"- --thread {free}")  # 가장 최근 활동이 먼저
+    issue_line = next(line for line in lines if line.startswith(f"- --issue {NEW_NO}"))
+    assert "실행 3회" in issue_line and "SYSTEM" in issue_line and "A002" in issue_line
+
+
+def test_export_cli(db_path, tmp_path, capsys):
+    make_session()
+    assert main(["--issue", str(NEW_NO), "--out", str(tmp_path)]) == 0
+    assert (tmp_path / f"issue_{NEW_NO}.md").exists()
+    assert main(["--list"]) == 0
+    assert f"--issue {NEW_NO}" in capsys.readouterr().out
+    assert main(["--issue", "999", "--out", str(tmp_path)]) == 1
+    assert "이슈 #999가 없습니다" in capsys.readouterr().err
+    assert main(["--thread", "free-X-20260101-000000", "--out", str(tmp_path)]) == 1
