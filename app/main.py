@@ -8,12 +8,14 @@ LLM_MODE=fake(기본)면 데모용 가짜 LLM, bedrock이면 실제 Bedrock을 �
 
 import asyncio
 import sys
+import threading
 from pathlib import Path
 
 # streamlit run은 이 파일의 폴더(app/)만 경로에 넣으므로, 패키지 import를 위해 저장소 루트를 넣는다.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import streamlit as st  # noqa: E402
+from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx  # noqa: E402
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage  # noqa: E402
 
 from app import config  # noqa: E402
@@ -197,11 +199,24 @@ def show_message(message) -> None:
 
 
 def send(thread_id: str, text: str) -> None:
-    with st.spinner("비서가 조사하는 중…"):
+    """대화 입력 1회. 비서가 일하는 동안 진행 상황(예: '도구 호출 중: get_vessel_mappings(V003) (3/8)')을 보여 준다."""
+    with st.status("비서가 조사하는 중…", expanded=True) as status:
+        line = st.empty()
+        ctx = get_script_run_ctx()
+
+        def progress(message: str) -> None:
+            # LangGraph는 동기 노드를 다른 스레드에서 돌린다. 화면을 고치려면 그 스레드에 Streamlit 실행 맥락을 붙인다.
+            add_script_run_ctx(threading.current_thread(), ctx)
+            line.write(message)
+            status.update(label=message)
+
         try:
-            asyncio.run(run_turn(thread_id, text))
+            asyncio.run(run_turn(thread_id, text, progress=progress))
         except LLMError as e:
+            status.update(label="응답 실패", state="error")
             st.error(f"모든 모델이 응답하지 못했습니다. 잠시 뒤 다시 시도해 주세요. ({e})")
+            return
+        status.update(label="완료", state="complete", expanded=False)
 
 
 def page_assistant() -> None:

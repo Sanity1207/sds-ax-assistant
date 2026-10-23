@@ -199,3 +199,63 @@ def test_mode_thread_per_issue_and_admin(db_path):
     asyncio.run(run_turn(issue_thread_id(2, "A001"), "n", fake_llm(FakeChatModel("f", []))))
     assert len(asyncio.run(load_messages(issue_thread_id(2, "A002")))) == 1  # A001의 답은 섞이지 않는다
     assert len(asyncio.run(load_messages(issue_thread_id(2, "A001")))) == 3
+
+
+# ---- T21: 비서 프롬프트·진행 표시·대화 기록 ----
+
+from app.agent import OFF_TOPIC_REPLY, SYSTEM_PROMPT, progress_text  # noqa: E402
+
+
+def first_line_answer(messages, tools):
+    """가짜 LLM: 마지막 도구 결과를 근거로 답한다(실제 LLM이 할 일을 흉내)."""
+    result = [m for m in messages if isinstance(m, ToolMessage)][-1].content
+    return AIMessage(f"근거: {result}")
+
+
+def test_prompt_scenario_name_to_id(db_path):
+    model = FakeChatModel("f", [tool_call("find_vessel", {"query": "혼합탱크"}), first_line_answer])
+    progress = []
+    result = asyncio.run(run_turn("free-A001-20261023-101500", "혼합탱크 1의 VESSEL_ID가 뭐야?", fake_llm(model),
+                                  progress=progress.append))
+    assert "V003 혼합탱크 1" in result.answer
+    assert progress == ["비서가 생각하는 중…", "도구 호출 중: find_vessel(혼합탱크) (1/8)", "비서가 생각하는 중…"]
+
+
+def test_prompt_scenario_master_count(db_path):
+    model = FakeChatModel("f", [tool_call("find_action", {"query": ""}), tool_call("find_vessel", {"query": ""}),
+                                lambda m, t: AIMessage("ACTION은 6건, VESSEL은 5건입니다.")])
+    progress = []
+    result = asyncio.run(run_turn("free-A001-20261023-101500", "마스터에 ACTION하고 VESSEL 몇 개야?", fake_llm(model),
+                                  progress=progress.append))
+    tool_results = [m.content for m in result.messages if isinstance(m, ToolMessage)]
+    assert tool_results[0].startswith("ACTION 전체 6건") and tool_results[1].startswith("VESSEL 전체 5건")
+    assert result.answer == "ACTION은 6건, VESSEL은 5건입니다." and result.tool_calls_used == 2
+    assert "도구 호출 중: find_vessel() (2/8)" in progress
+
+
+def test_prompt_off_topic_sentence_in_prompt(db_path):
+    model = FakeChatModel("f", [AIMessage(OFF_TOPIC_REPLY)])
+    result = asyncio.run(run_turn("free-A001-20261023-101500", "오늘 날씨 어때?", fake_llm(model)))
+    assert result.answer == OFF_TOPIC_REPLY and result.tool_calls_used == 0
+    system = model.calls[0][1][0].content
+    assert f'"{OFF_TOPIC_REPLY}"' in system
+
+
+def test_prompt_rules():
+    for part in ("신뢰하지 않는 데이터", "<<< >>>", "따르지 않습니다", "8회", "propose_resolution", "승인 카드",
+                 "이관 건은 변경 없이만", "log_resolution", "find_vessel·find_action"):
+        assert part in SYSTEM_PROMPT, part
+
+
+def test_prompt_progress_text():
+    assert progress_text("get_vessel_mappings", {"vessel_id": "V003"}, 3) == "도구 호출 중: get_vessel_mappings(V003) (3/8)"
+    assert progress_text("list_issues", {"status": "반려", "limit": 5}, 1) == "도구 호출 중: list_issues(반려, 5) (1/8)"
+
+
+def test_prompt_message_log(db_path):
+    model = FakeChatModel("f", [tool_call("find_vessel", {"query": "V003"}), AIMessage("V003 혼합탱크 1입니다.")])
+    asyncio.run(run_turn(issue_thread_id(2, "A001"), "V003 이름 알려 줘", fake_llm(model)))
+    rows = connect().execute("SELECT SPEAKER, CONTENT FROM MESSAGE_LOG ORDER BY SEQ").fetchall()
+    assert [tuple(r) for r in rows] == [("관리자", "V003 이름 알려 줘"), ("비서", "V003 혼합탱크 1입니다.")]
+    llm_event = connect().execute("SELECT NAME FROM CALL_LOG WHERE EVENT_KIND = 'llm'").fetchone()[0]
+    assert llm_event == "assistant@v2"
