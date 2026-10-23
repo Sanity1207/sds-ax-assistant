@@ -37,9 +37,9 @@ def test_skeleton_register_creates_issue(db_path):
     conn.close()
 
 
-def test_skeleton_unknown_type_needs_check(db_path):
-    other = dict(CREATE, type="매핑 삭제", reason="V001에서 103 삭제 요청")
-    out = register_issue("C002", "V001", "103", "V001의 103 빼 주세요", fake_llm(FakeChatModel("f", [other])))
+def test_skeleton_undecidable_needs_check(db_path):
+    other = dict(CREATE, type="판단 불가", reason="무엇을 원하는지 알 수 없음")
+    out = register_issue("C002", "V001", "103", "확인 부탁", fake_llm(FakeChatModel("f", [other])))
     assert (out.status, out.owner_role) == ("확인필요", "매핑 담당자")
 
 
@@ -130,3 +130,75 @@ def test_precheck_passes_valid_input(db_path):
     row = conn.execute("SELECT VESSEL_ID, ACTION_SEQ, INQUIRY FROM ISSUE WHERE ISSUE_NO = ?", (out.issue_no,)).fetchone()
     assert tuple(row) == ("V003", "104", "추가")
     conn.close()
+
+
+# ---- T15: 규칙표 전체 ----
+
+from app.classify import MASTER_RULES, RULES  # noqa: E402
+
+# (분류 출력 일부, 기대 처리상태, 기대 담당자, 기대 처리결과). 규칙표의 모든 행 + 적용 순서.
+RULE_CASES = [
+    ({"type": "매핑 생성"}, "처리대기", "매핑 담당자", "매핑 생성 요청으로 분류. 근거: R"),
+    ({"type": "매핑 수정"}, "처리대기", "매핑 담당자", "매핑 수정 요청으로 분류. 근거: R"),
+    ({"type": "매핑 삭제"}, "처리대기", "매핑 담당자", "매핑 삭제 요청으로 분류. 근거: R"),
+    ({"type": "값 이상"}, "확인필요", "매핑 담당자", "값 이상 요청으로 분류. 근거: R"),
+    ({"type": "마스터 요청", "master_target": "VESSEL"}, "이관", "VESSEL 담당자",
+     "마스터 요청(VESSEL)으로 분류해 VESSEL 담당자에게 이관. 근거: R"),
+    ({"type": "마스터 요청", "master_target": "ACTION"}, "이관", "ACTION 담당자",
+     "마스터 요청(ACTION)으로 분류해 ACTION 담당자에게 이관. 근거: R"),
+    ({"type": "마스터 요청", "master_target": "둘 다"}, "이관", "VESSEL 담당자, ACTION 담당자",
+     "마스터 요청(VESSEL·ACTION)으로 분류해 VESSEL 담당자, ACTION 담당자에게 이관. 근거: R"),
+    ({"type": "마스터 요청", "master_target": "모름"}, "반려", "매핑 담당자",
+     "마스터 요청이지만 대상(VESSEL·ACTION)을 알 수 없어 반려. 근거: R"),
+    ({"type": "마스터 요청", "master_target": None}, "반려", "매핑 담당자",
+     "마스터 요청이지만 대상(VESSEL·ACTION)을 알 수 없어 반려. 근거: R"),
+    ({"type": "담당 외"}, "거절", "", "담당 외 요청이라 거절. 근거: R"),
+    ({"type": "판단 불가"}, "확인필요", "매핑 담당자", "유형을 판단할 수 없어 매핑 담당자 확인 필요. 근거: R"),
+    # 적용 순서: multiple_requests → id_mismatch → type별
+    ({"type": "매핑 생성", "multiple_requests": True}, "반려", "매핑 담당자", "한 문의에 요청이 여러 개라 반려. 근거: R"),
+    ({"type": "매핑 생성", "id_mismatch": True}, "반려", "매핑 담당자", "입력칸과 문의내용의 ID가 달라 반려. 근거: R"),
+    ({"type": "담당 외", "multiple_requests": True, "id_mismatch": True}, "반려", "매핑 담당자",
+     "한 문의에 요청이 여러 개라 반려. 근거: R"),
+    ({"type": "마스터 요청", "master_target": "VESSEL", "id_mismatch": True}, "반려", "매핑 담당자",
+     "입력칸과 문의내용의 ID가 달라 반려. 근거: R"),
+    # 마스터 요청이 아니면 master_target은 보지 않는다.
+    ({"type": "매핑 생성", "master_target": "VESSEL"}, "처리대기", "매핑 담당자", "매핑 생성 요청으로 분류. 근거: R"),
+]
+
+
+@pytest.mark.parametrize("fields, status, owner, result", RULE_CASES,
+                         ids=[f"{i}-{c[0]['type']}-{c[1]}" for i, c in enumerate(RULE_CASES)])
+def test_rules_table(db_path, fields, status, owner, result):
+    conn = connect()
+    before = mappings(conn)
+    answer = {"multiple_requests": False, "id_mismatch": False, "master_target": None, "reason": " R \n"} | fields
+    out = register_issue("C001", "V003", "104", "문의", fake_llm(FakeChatModel("f", [answer])), conn)
+    row = conn.execute("SELECT * FROM ISSUE WHERE ISSUE_NO = ?", (out.issue_no,)).fetchone()
+    assert (row["STATUS"], row["OWNER_ROLE"], row["RESULT"]) == (status, owner, result)
+    assert (out.status, out.owner_role, out.result) == (status, owner, result)
+    if status in ("반려", "거절"):
+        # 분류 단계에서 닫히는 건: 처리일시 = 분류 시각, 처리자 = SYSTEM
+        assert row["PROCESSOR_ID"] == "SYSTEM" and row["PROCESSED_AT"] >= row["RECEIVED_AT"]
+    else:
+        assert row["PROCESSOR_ID"] is None and row["PROCESSED_AT"] is None
+    assert mappings(conn) == before
+    conn.close()
+
+
+def test_rules_cover_every_type():
+    """규칙표가 분류 스키마의 모든 유형·대상을 덮는다(빠진 유형이 있으면 KeyError가 날 자리)."""
+    from typing import get_args
+
+    from app.classify import InquiryType, MasterTarget
+
+    assert set(RULES) | {"마스터 요청"} == set(get_args(InquiryType))
+    assert set(MASTER_RULES) == set(get_args(MasterTarget)) | {None}
+
+
+def test_rules_branch_event_names_rule(db_path):
+    answer = dict(CREATE, type="마스터 요청", master_target="ACTION")
+    register_issue("C002", "V002", "103", "교반 이름 바꿔 주세요", fake_llm(FakeChatModel("f", [answer])))
+    import json
+
+    branch = connect().execute("SELECT OUTPUT FROM CALL_LOG WHERE NAME = '규칙표'").fetchone()[0]
+    assert json.loads(branch) == {"rule": "마스터 요청(ACTION)", "status": "이관", "owner_role": "ACTION 담당자"}

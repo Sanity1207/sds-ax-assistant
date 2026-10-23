@@ -48,7 +48,7 @@ def test_record_register_creates_one_run(db_path):
     assert out["parsed"]["type"] == "매핑 생성" and out["raw"] == CREATE
     assert [a["model_id"] for a in out["attempts"]] == ["fake-1"]
     assert llm["MODEL_ID"] == "fake-1" and llm["SUCCESS"] == "Y" and llm["ELAPSED_MS"] >= 0
-    assert json.loads(rows[2]["OUTPUT"]) == {"status": "처리대기", "owner_role": "매핑 담당자"}
+    assert json.loads(rows[2]["OUTPUT"]) == {"rule": "매핑 생성", "status": "처리대기", "owner_role": "매핑 담당자"}
     conn.close()
 
 
