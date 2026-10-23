@@ -13,7 +13,7 @@
 | --- | --- | --- |
 | T14 등록 전 Python 검사 | `pytest -q tests/test_classify.py -k precheck` | 16건 통과 |
 | T15 규칙표 전체 | `pytest -q tests/test_classify.py -k rules` | 18건 통과 |
-| T16 분류 실패·[다시 분류]·프롬프트 | `pytest -q tests/test_classify.py` | 전체 52건 통과 |
+| T16 분류 실패·[다시 분류]·프롬프트 | `pytest -q tests/test_classify.py` | 전체 51건 통과 |
 
 ### 커밋 목록
 
