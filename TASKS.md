@@ -48,7 +48,7 @@
   - 확인: `pytest -q tests/test_trace.py -k export` — `traces/issue_<no>.md` 생성, 이벤트 순서가 시각순
 - [x] **T12 사용자 선택·권한** — 우측 상단 현재 사용자(이름·권한)·드롭다운, 시작 시 A001. 권한 3종별 화면 제한 + 등록·승인 함수 안에서 Python 재확인. SYSTEM은 드롭다운에 나오지 않음.
   - 확인: `pytest -q tests/test_ui.py -k role` — C005는 등록 폼·[이 건 조사] 없음, 등록 함수를 C005로 직접 호출하면 거부
-- [ ] **T13 이슈대장 화면 완성** — 조회·필터(처리상태, "내 요청만")·상세, 값 직접 수정 불가, 관리자에게만 [이 건 조사].
+- [x] **T13 이슈대장 화면 완성** — 조회·필터(처리상태, "내 요청만")·상세, 값 직접 수정 불가, 관리자에게만 [이 건 조사].
   - 확인: `pytest -q tests/test_ui.py -k ledger` — "내 요청만" 필터 결과가 현재 사용자 건만, 편집 가능한 위젯 없음
 
 ## 묶음 3 · Ⓐ 신규 등록·자동 분류 완성
@@ -143,6 +143,8 @@ Claude Code로 구현하는 기준이다. 작업당 15~25분(작성 + 가짜 LLM
 - 2026-10-23 T10 완료: app/recorder.py(start_run·Run, 이벤트마다 새 연결로 바로 커밋), 분류(문의 등록·다시 분류 실행)와 비서(대화 입력 실행: llm·branch·tool·finalize, MESSAGE_LOG)에 연결. 비서의 모든 모델 실패가 ExceptionGroup으로 감싸여 except LLMError에 안 잡히던 문제를 고쳤다. tests/test_trace.py -k record 11건
 - 2026-10-23 T11 완료: app/trace.py(--issue·--thread·--list, --out으로 출력 폴더 변경). 이벤트·말을 (시각, 실행 순서, 순번)으로 정렬, 시드 이슈는 '시드로 넣은 건이라 기록 없음'. tests/test_trace.py -k export 6건
 - 2026-10-23 T12 완료: app/auth.py(권한표·require), 오른쪽 위 사용자 드롭다운(SYSTEM 제외, 시작 A001), 권한별 메뉴·[이 건 조사] 제한, register_issue는 권한 없으면 저장 없이 RegistrationRejected('등록 거부' 실행 기록), run_turn은 관리자 아니면 PermissionDenied. 승인 함수의 재확인은 승인 함수를 만드는 T25에서 같은 require로 붙인다. tests/test_ui.py -k role 10건
+- 2026-10-23 T13 완료: 처리상태 다중 선택·'내 요청만' 필터, 행마다 펼치는 상세(이름·담당자 연락처·처리 이력)와 관리자 전용 [이 건 조사], 편집 위젯 없음(st.dataframe 읽기 전용). tests/test_ui.py -k ledger 10건
+- 2026-10-23 묶음 2(T09~T13) 완료: pytest 전체 통과, 결정 사항은 REPORT_묶음2.md
 
 ## 실제 Bedrock 점검 목록
 

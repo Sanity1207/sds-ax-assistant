@@ -141,3 +141,99 @@ def test_role_assistant_function_rejects_non_admin(db_path, user_id):
     with pytest.raises(PermissionDenied):
         asyncio.run(run_turn(issue_thread_id(2, user_id), "조사해 줘"))
     assert connect().execute("SELECT COUNT(*) FROM PROCESS_LOG").fetchone()[0] == 0
+
+
+# ---- T13: 이슈대장 화면 ----
+
+EDITABLE = ("text_input", "text_area", "number_input", "date_input", "time_input", "color_picker", "slider",
+            "select_slider", "toggle", "radio")
+
+
+def ledger(at, user_id="A001", statuses=None, mine=None):
+    if user_id != "A001":
+        as_user(at, user_id)
+    at.sidebar.radio(key="page").set_value("이슈대장").run()
+    if statuses is not None:
+        at.multiselect(key="ledger_status").set_value(statuses).run()
+    if mine is not None:
+        at.checkbox(key="ledger_mine").set_value(mine).run()
+    assert not at.exception
+    return at
+
+
+def table_of(at):
+    return at.dataframe[0].value
+
+
+def test_ledger_mine_only_filter(db_path):
+    at = ledger(open_app(), "C001", mine=True)
+    table = table_of(at)
+    assert set(table["요청자 ID"]) == {"C001"}
+    assert sorted(table["번호"]) == [1, 2, 6]
+    at.checkbox(key="ledger_mine").uncheck().run()
+    assert len(table_of(at)) == len(ISSUES)
+
+
+def test_ledger_mine_only_follows_current_user(db_path):
+    at = ledger(open_app(), "C004", mine=True)
+    assert set(table_of(at)["요청자 ID"]) == {"C004"}
+    as_user(at, "C002")
+    assert set(table_of(at)["요청자 ID"]) == {"C002"}
+    as_user(at, "C005")  # 요청한 건이 없는 조회 고객
+    assert len(at.dataframe) == 0 and at.info[0].value == "조건에 맞는 이슈가 없습니다."
+
+
+def test_ledger_status_filter(db_path):
+    at = ledger(open_app(), statuses=["반려"])
+    assert list(table_of(at)["번호"]) == [9, 8]
+    at.multiselect(key="ledger_status").set_value(["처리대기", "이관"]).run()
+    assert sorted(table_of(at)["번호"]) == [2, 3, 4, 7]
+    at.checkbox(key="ledger_mine").check().run()  # A001이 요청한 건은 없다
+    assert len(at.dataframe) == 0
+
+
+def test_ledger_status_and_mine_combined(db_path):
+    at = ledger(open_app(), "C001", statuses=["확인필요"], mine=True)
+    assert list(table_of(at)["번호"]) == [6]
+
+
+def test_ledger_detail(db_path):
+    at = ledger(open_app(), "C005")
+    labels = [e.label for e in at.expander]
+    assert len(labels) == len(ISSUES) and labels[-1].startswith("#1 · 완료 · V002 / 103")
+    texts = lambda exp: " ".join(m.value for m in exp.markdown)  # noqa: E731
+    done = texts(at.expander[-1])
+    assert "요청자: C001 김민수" in done and "VESSEL_ID: V002 반응기 B" in done and "ACTION_SEQ: 103 교반" in done
+    assert "처리자: A001 윤도현" in done and "처리 이력" in done and "실행 성공" in done
+    moved = texts(next(e for e in at.expander if e.label.startswith("#7 ")))
+    assert "담당자: ACTION 담당자 — 연락처: ACTION 담당자 오세훈(내선 1003)" in moved
+
+
+def test_ledger_has_no_editing_widgets(db_path):
+    for user_id in ("A001", "C001", "C005"):
+        at = ledger(open_app(), user_id)
+        for kind in EDITABLE:
+            if kind == "radio":  # 사이드바의 화면 선택 radio만 있다
+                assert [r.key for r in at.radio] == ["page"]
+                continue
+            assert len(at.get(kind)) == 0, (user_id, kind)
+        # 표는 읽기 전용(st.dataframe). st.data_editor면 editing_mode가 READ_ONLY가 아니다.
+        assert all(df.proto.editing_mode == df.proto.EditingMode.READ_ONLY for df in at.dataframe)
+        assert [b.label for b in at.button if b.label != "이 건 조사"] == []
+
+
+def test_ledger_investigate_only_for_admin(db_path):
+    at = ledger(open_app())
+    assert sorted(b.key for b in investigate_buttons(at)) == sorted(f"investigate_{n}" for n in range(1, 10))
+    for user_id in ("C001", "C005"):
+        assert not investigate_buttons(ledger(open_app(), user_id))
+
+
+def test_ledger_investigate_opens_issue_thread(db_path):
+    at = ledger(open_app(), "A002")
+    at.button(key="investigate_3").click().run()
+    assert not at.exception
+    assert at.sidebar.radio(key="page").value == "조사 비서"
+    assert at.caption[0].value.startswith("이슈 #3 · V003 / 103")
+    run = connect().execute("SELECT THREAD_ID, USER_ID FROM PROCESS_LOG").fetchone()
+    assert tuple(run) == ("issue-3-A002", "A002")

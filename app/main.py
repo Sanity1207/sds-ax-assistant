@@ -20,7 +20,7 @@ from app import config  # noqa: E402
 from app.agent import issue_thread_id, load_messages, run_turn  # noqa: E402
 from app.auth import DEFAULT_USER, can, get_user, selectable_users  # noqa: E402
 from app.classify import RegistrationRejected, register_issue  # noqa: E402
-from app.db import connect  # noqa: E402
+from app.db import STATUSES, connect  # noqa: E402
 from app.llm import LLMError  # noqa: E402
 
 # 화면 → 필요한 행동 권한(app/auth.py PERMISSIONS)
@@ -52,23 +52,75 @@ def current_user():
     return get_user(st.session_state.current_user)
 
 
+def ledger_rows(statuses: list[str], mine_only: bool, user_id: str) -> list:
+    """이슈대장 조회. 처리상태(여러 개 고르면 그중 하나)와 '내 요청만'(요청자 = 현재 사용자)으로 거른다."""
+    where, params = [], []
+    if statuses:
+        where.append(f"STATUS IN ({', '.join('?' for _ in statuses)})")
+        params += statuses
+    if mine_only:
+        where.append("REQUESTER_ID = ?")
+        params.append(user_id)
+    sql = f"SELECT {', '.join(LEDGER_COLUMNS)} FROM ISSUE"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    return query(sql + " ORDER BY ISSUE_NO DESC", tuple(params))
+
+
+def show_issue_detail(issue_no: int, admin: bool) -> None:
+    """이슈 상세: 모든 칸(이름 포함), 담당자 연락처, 처리 이력(RESOLUTION_LOG). 값은 읽기만 한다."""
+    r = query(
+        "SELECT I.*, V.VESSEL_NAME, A.ACTION_DESCRIPTION, R.USER_NAME AS REQUESTER_NAME, P.USER_NAME AS PROCESSOR_NAME"
+        " FROM ISSUE I JOIN VESSEL_MST V ON V.VESSEL_ID = I.VESSEL_ID JOIN ACTION_MST A ON A.ACTION_SEQ = I.ACTION_SEQ"
+        " JOIN USER_MST R ON R.USER_ID = I.REQUESTER_ID LEFT JOIN USER_MST P ON P.USER_ID = I.PROCESSOR_ID"
+        " WHERE I.ISSUE_NO = ?", (issue_no,))[0]
+    # 담당자 칸이 'VESSEL 담당자, ACTION 담당자'면 두 사람의 연락처를 모두 보여 준다.
+    roles = [x.strip() for x in r["OWNER_ROLE"].split(",") if x.strip()]
+    contacts = [f"{o['OWNER_ROLE']} {o['OWNER_NAME']}({o['CONTACT']})" for o in query(
+        f"SELECT * FROM OWNER_MST WHERE OWNER_ROLE IN ({', '.join('?' for _ in roles)})", tuple(roles))] if roles else []
+    lines = [
+        f"- 접수일시: {r['RECEIVED_AT']}",
+        f"- 요청자: {r['REQUESTER_ID']} {r['REQUESTER_NAME']}",
+        f"- VESSEL_ID: {r['VESSEL_ID']} {r['VESSEL_NAME']}",
+        f"- ACTION_SEQ: {r['ACTION_SEQ']} {r['ACTION_DESCRIPTION']}",
+        f"- 담당자: {r['OWNER_ROLE'] or '(빈칸)'}" + (f" — 연락처: {', '.join(contacts)}" if contacts else ""),
+        f"- 처리상태: {r['STATUS']}",
+        f"- 처리결과: {r['RESULT'] or '-'}",
+        f"- 처리일시: {r['PROCESSED_AT'] or '-'}",
+        f"- 처리자: {(r['PROCESSOR_ID'] + ' ' + (r['PROCESSOR_NAME'] or '')) if r['PROCESSOR_ID'] else '-'}",
+    ]
+    if r["PARENT_ISSUE_NO"]:
+        lines.append(f"- 원래 번호: #{r['PARENT_ISSUE_NO']}")
+    st.markdown(f"**문의내용**: {r['INQUIRY']}")
+    st.markdown("\n".join(lines))
+    history = query("SELECT * FROM RESOLUTION_LOG WHERE ISSUE_NO = ? ORDER BY LOG_ID", (issue_no,))
+    if history:
+        st.markdown("**처리 이력**")
+        st.markdown("\n".join(f"- {h['LOGGED_AT']} · {h['KIND']} · {h['USER_ID']} · {h['CONTENT']}" for h in history))
+    if admin:
+        st.button("이 건 조사", key=f"investigate_{issue_no}", on_click=start_investigation, args=(issue_no,))
+
+
 def page_ledger() -> None:
+    """이슈대장: 모든 권한이 읽는다. 값을 직접 고치는 위젯은 없다(변경은 처리안 + 승인으로만)."""
     st.header("이슈대장")
-    rows = query(f"SELECT {', '.join(LEDGER_COLUMNS)} FROM ISSUE ORDER BY ISSUE_NO DESC")
+    user_id = st.session_state.current_user
+    left, right = st.columns([3, 1])
+    statuses = left.multiselect("처리상태", STATUSES, key="ledger_status", placeholder="전체")
+    mine_only = right.checkbox("내 요청만", key="ledger_mine")
+    rows = ledger_rows(statuses, mine_only, user_id)
     if not rows:
-        st.info("등록된 이슈가 없습니다.")
+        st.info("조건에 맞는 이슈가 없습니다.")
         return
+    st.caption(f"{len(rows)}건")
     table = [{LEDGER_COLUMNS[k]: r[k] for k in LEDGER_COLUMNS} for r in rows]
     st.dataframe(table, hide_index=True, width="stretch")
 
-    if not can(current_user()["ROLE"], "investigate"):
-        return
-    st.subheader("이슈별 조사")
+    st.subheader("상세")
+    admin = can(current_user()["ROLE"], "investigate")
     for r in rows:
-        left, right = st.columns([6, 1])
-        left.write(f"#{r['ISSUE_NO']} · {r['VESSEL_ID']} / {r['ACTION_SEQ']} · {r['STATUS']} · {r['INQUIRY'][:40]}")
-        right.button("이 건 조사", key=f"investigate_{r['ISSUE_NO']}",
-                     on_click=start_investigation, args=(r["ISSUE_NO"],))
+        with st.expander(f"#{r['ISSUE_NO']} · {r['STATUS']} · {r['VESSEL_ID']} / {r['ACTION_SEQ']} · {r['INQUIRY'][:40]}"):
+            show_issue_detail(r["ISSUE_NO"], admin)
 
 
 def page_register() -> None:
