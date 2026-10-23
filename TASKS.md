@@ -79,7 +79,7 @@
 
 ## 묶음 5 · ① 처리안 승인
 
-- [ ] **T24 propose_resolution + 검사 + 위험 등급** — 그 화면 이슈만 허용, 이슈대장·데이터 일치 규칙, 마스터 값·상태 전이 검사, 어긋나면 `[오류]` 안내. 위험 등급은 Python이 DB 상태로(EXECUTED_YN='Y' 포함 → destructive, 미등록 도구 → 승인 필요).
+- [x] **T24 propose_resolution + 검사 + 위험 등급** — 그 화면 이슈만 허용, 이슈대장·데이터 일치 규칙, 마스터 값·상태 전이 검사, 어긋나면 `[오류]` 안내. 위험 등급은 Python이 DB 상태로(EXECUTED_YN='Y' 포함 → destructive, 미등록 도구 → 승인 필요).
   - 확인: `pytest -q tests/test_approval.py -k propose` — 다른 이슈 번호·매핑 변경+반려 등 위반 처리안 거부, Y 매핑 삭제 → destructive
 - [ ] **T25 interrupt 승인 카드** — 쓰기는 interrupt로 멈춤. 카드 항목(위험 등급·도구·전후 값·EXECUTED_YN·이슈 번호·문의 원문)은 Python이 DB에서 직접 읽음. 입력은 y/n/e만(공백·대소문자 무시), 그 밖은 비서에게 보내지 않고 다시 묻기.
   - 확인: `pytest -q tests/test_approval.py -k card` — 카드 필드가 DB 원본과 일치, "ㅇㅇ" 입력 시 LLM 호출 0·다시 묻기
@@ -158,6 +158,7 @@ Claude Code로 구현하는 기준이다. 작업당 15~25분(작성 + 가짜 LLM
 - 2026-10-23 T22 완료: 상태에 calls_seen·fail_tool·fail_count, agent 노드가 중복·상한을, tools 노드가 상한·연속 2회 실패를 판정해 stop_reason → finalize. 실행 안 한 호출엔 '[멈춤]' 결과로 짝 맞춤. finalize는 도구 없이 LLM 1회(도구 호출·결과를 글로 풀어 보냄, finalize@v1), 실패 시 Python 문장. 첫 줄 '조사 한도 도달(사유).'/'도구 실패로 조사를 멈췄습니다(사유).'은 Python. PROCESS_LOG 결과 '멈춤'. tests/test_stop_and_failure.py -k stop 9건
 - 2026-10-23 T23 완료: retry_turn([다시 시도], 실행 종류 '다시 시도' 추가)이 graph.ainvoke(None)로 체크포인터의 멈춘 노드부터 이어 감(도구 결과·예산 유지). ToolRunner가 MCP 전송 오류 시 1회 재연결(연결 설정으로 도구를 새로 읽음), 실패하면 McpUnavailable. 실패로 멈춘 thread에 새 입력이 오면 멈춘 작업을 닫고 진행. 화면: 오류 배너 + [다시 시도]. tests/test_stop_and_failure.py 16건, test_ui -k failure
 - 2026-10-23 묶음 4(T17~T23) 완료: 결정 사항은 REPORT_묶음4.md
+- 2026-10-23 T24 완료: app/resolution.py check_proposal(화면 이슈만·열린 건만·상태 전이·이슈대장 일치·입력칸 대상·마스터·매핑 존재/부재, 문제 모두 모음), 위험 등급(수정·삭제 대상이 Y면 destructive), change_text. MCP 도구 propose_resolution(위험 등급 write, 검사만 하고 쓰지 않음). tests/test_approval.py -k propose 37건
 
 ## 실제 Bedrock 점검 목록
 

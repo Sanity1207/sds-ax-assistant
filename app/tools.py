@@ -83,6 +83,18 @@ TOOL_SPECS: dict[str, dict] = {
     },
 }
 
+TOOL_SPECS["propose_resolution"] = {
+    "description": (
+        "지금 화면의 열린 이슈에 대한 처리안(매핑 변경 0~1건 + 새 처리상태 + 처리결과 설명)을 제안한다. "
+        "Python이 이슈대장·데이터 일치 규칙과 마스터 값을 검사하고 위험 등급을 정하며, 통과하면 관리자 승인 카드로 멈춘다. "
+        "승인되기 전에는 아무것도 반영되지 않는다. mapping_change: 매핑을 바꾸지 않으면 null, 바꾸면 "
+        "{kind: create|update|delete, vessel_id: 이슈의 VESSEL_ID 칸, action_seq: 이슈의 ACTION_SEQ 칸, "
+        "new_action_seq: 수정일 때만 바꿀 ACTION}. new_status: 완료·반려·거절 중 하나. "
+        "매핑을 바꾸면 새 상태는 완료뿐이다."
+    ),
+    "risk": "write",
+}
+
 READ_TOOLS = tuple(name for name, spec in TOOL_SPECS.items() if spec["risk"] == "read")
 NOTE_MAX = 500
 
@@ -371,6 +383,24 @@ def log_resolution(issue_no: Annotated[int | str, Field(description="지금 화�
     return f"처리 이력에 기록함: #{n} · note · {user_id} · {text}"
 
 
+def propose_resolution(
+        issue_no: Annotated[int | str, Field(description="지금 화면의 이슈 번호")],
+        new_status: Annotated[str, Field(description="새 처리상태: 완료·반려·거절")],
+        result: Annotated[str, Field(description="처리결과 설명(한두 문장). 첫머리의 [매핑 변경] 표시는 Python이 붙인다")],
+        mapping_change: Annotated[dict | str | None, Field(
+            description="매핑 변경. 없으면 null. 예: {\"kind\": \"update\", \"vessel_id\": \"V003\", "
+                        "\"action_seq\": \"103\", \"new_action_seq\": \"105\"}")] = None) -> str:
+    from app.resolution import check_proposal, summary
+
+    _, screen = screen_context()
+    checked = check_proposal(issue_no, mapping_change, new_status, result, screen)
+    if not checked.ok:
+        return checked.error_text({"issue_no": issue_no, "mapping_change": mapping_change, "new_status": new_status})
+    p = checked.proposal
+    return (f"처리안 검사 통과: {summary(p)}. 처리결과 설명: {p['result']}\n"
+            "이 처리안은 아직 반영되지 않았습니다. 관리자가 승인 카드에서 승인해야 반영됩니다.")
+
+
 TOOLS_IMPL = {
     "find_vessel": find_vessel,
     "find_action": find_action,
@@ -379,6 +409,7 @@ TOOLS_IMPL = {
     "get_issue": get_issue,
     "get_issue_trace": get_issue_trace,
     "log_resolution": log_resolution,
+    "propose_resolution": propose_resolution,
 }
 
 assert set(TOOL_SPECS) == set(TOOLS_IMPL), f"TOOL_SPECS와 TOOLS_IMPL 이름 불일치: {set(TOOL_SPECS) ^ set(TOOLS_IMPL)}"
