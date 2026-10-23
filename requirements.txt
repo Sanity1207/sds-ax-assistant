@@ -1,0 +1,15 @@
+# Python 3.14. 설치: .venv/Scripts/python -m pip install -r requirements.txt
+
+# 스택 (CLAUDE.md)
+langgraph==1.2.16
+
+# seed.yaml에서 설치 허락됨
+mcp==1.30.0                         # langchain-mcp-adapters 0.3.2가 mcp<2.0을 요구
+langchain-mcp-adapters==0.3.2
+streamlit==1.66.1
+
+# 설치 승인 필요 (TASKS.md T01)
+langchain-aws==1.9.0                # Bedrock 채팅·구조화 출력·도구 바인딩
+python-dotenv==1.2.4                # .env 로딩
+pytest==9.1.1                       # 테스트
+langgraph-checkpoint-sqlite==3.1.2  # 앱 재시작 후에도 대화 thread 유지

@@ -1,6 +1,23 @@
+# 비밀 정보 (실제 AWS 키)
 .env
+
+# 가상환경
 .venv/
+
+# SQLite DB: 앱 DB(data/app.db)·체크포인터 DB와 저널 파일. 시드 스크립트로 다시 만든다
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+
+# 처리 기록 출력 파일 (python -m app.trace)
+traces/*.md
+
+# Python 부산물
 __pycache__/
 *.pyc
 .pytest_cache/
-data/*.db
+
+# 개발 모드 설치(pip install -e .) 부산물
+*.egg-info/
+build/
