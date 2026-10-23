@@ -42,14 +42,22 @@ def test_skeleton_investigate_shows_answer(db_path):
     at.button(key=f"investigate_{NEW_NO}").click().run()
     assert not at.exception
     assert at.sidebar.radio(key="page").value == "조사 비서"
-    answers = [m for m in at.chat_message if m.name == "assistant"]
-    texts = " ".join(el.value for m in answers for el in m.children.values() if hasattr(el, "value"))
+    # 열린 이슈의 새 thread: 비서가 LLM 없이 첫 질문을 한다.
+    assert chat_texts(at, "assistant") == [f"이슈 #{NEW_NO} 건에 대해 조사를 진행하시겠습니까? (y/n)"]
+
+    at.chat_input[0].set_value(" Y ").run()  # 데모 가짜 LLM은 get_issue를 부른 뒤 결과를 답한다
+    assert not at.exception
+    texts = " ".join(chat_texts(at, "assistant"))
     assert "V003" in texts and "혼합탱크 1" in texts
 
     at.chat_input[0].set_value("V001도 찾아 줘").run()
     assert not at.exception
-    users = [m for m in at.chat_message if m.name == "user"]
-    assert len(users) == 2
+    assert len(chat_texts(at, "user")) == 2
+
+
+def chat_texts(at, name):
+    """대화창에서 name(user·assistant) 쪽 말의 글(도구 호출·결과 caption 포함)."""
+    return [el.value for m in at.chat_message if m.name == name for el in m.children.values() if hasattr(el, "value")]
 
 
 def test_skeleton_empty_inquiry_not_saved(db_path):
@@ -237,6 +245,8 @@ def test_ledger_investigate_opens_issue_thread(db_path):
     assert not at.exception
     assert at.sidebar.radio(key="page").value == "조사 비서"
     assert at.caption[0].value.startswith("이슈 #3 · V003 / 103")
+    assert at.caption[1].value == "열린 이슈 대화 · thread issue-3-A002"
+    at.chat_input[0].set_value("y").run()
     run = connect().execute("SELECT THREAD_ID, USER_ID FROM PROCESS_LOG").fetchone()
     assert tuple(run) == ("issue-3-A002", "A002")
 
@@ -273,3 +283,30 @@ def test_reclassify_register_failure_shows_info_without_banner(db_path, monkeypa
     at = register(open_app(), "V003", "104", "V003에 104 추가")
     assert at.success[0].value == f"접수됨 #{NEW_NO}, 처리상태: 확인필요, 처리결과: {FAILED_RESULT}"
     assert "다시 분류" in at.info[0].value and len(at.error) == 0  # 배너 없음
+
+
+# ---- T18: 대화 모드·thread·첫 질문 ----
+
+def test_mode_menu_opens_free_chat_and_new_chat(db_path):
+    import time
+
+    at = ledger(open_app())
+    at.button(key="investigate_2").click().run()
+    at.sidebar.radio(key="page").set_value("이슈대장").run()
+    at.sidebar.radio(key="page").set_value("조사 비서").run()  # 메뉴로 들어오면 선택된 이슈 없음
+    assert not at.exception
+    first = at.caption[0].value
+    assert first.startswith("이슈 없는 대화 · thread free-A001-")
+    assert chat_texts(at, "assistant") == []  # 이슈 없는 대화는 첫 질문 없음
+    at.chat_input[0].set_value("혼합탱크 ID 알려 줘").run()
+    assert "V003" in " ".join(chat_texts(at, "assistant"))
+    time.sleep(1.1)  # thread ID는 초 단위 시작 시각
+    at.button(key="new_chat").click().run()
+    assert at.caption[0].value != first and chat_texts(at, "user") == []
+
+
+def test_mode_closed_issue_has_no_first_question(db_path):
+    at = ledger(open_app())
+    at.button(key="investigate_1").click().run()
+    assert at.caption[1].value == "닫힌 이슈 대화(조회 전용) · thread issue-1-A001"
+    assert chat_texts(at, "assistant") == []

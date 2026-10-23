@@ -17,7 +17,8 @@ import streamlit as st  # noqa: E402
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage  # noqa: E402
 
 from app import config  # noqa: E402
-from app.agent import issue_thread_id, load_messages, run_turn  # noqa: E402
+from app.agent import (MODE_NAMES, REQUEST_TAG, free_thread_id, issue_mode, issue_thread_id, load_messages,  # noqa: E402
+                       open_thread, run_turn)
 from app.auth import DEFAULT_USER, PermissionDenied, can, get_user, selectable_users  # noqa: E402
 from app.classify import (FAILED_RESULT, ReclassifyNotAllowed, RegistrationRejected, can_reclassify,  # noqa: E402
                           classify_issue, register_issue)
@@ -45,7 +46,17 @@ def start_investigation(issue_no: int) -> None:
     """[이 건 조사] 버튼 콜백: 조사 비서 화면으로 옮기고 첫 조사 요청을 예약한다."""
     st.session_state.page = "조사 비서"
     st.session_state.chat_issue = issue_no
-    st.session_state.pending_first_turn = True
+
+
+def leave_issue_chat() -> None:
+    """메뉴에서 조사 비서를 고르거나 [이슈 없는 대화로]를 누르면 선택된 이슈 없이 대화한다."""
+    st.session_state.chat_issue = None
+
+
+def new_free_chat() -> None:
+    """[새 대화]: 이슈 없는 대화 thread를 새로 시작한다(free-<관리자>-<시작 시각>)."""
+    st.session_state.setdefault("free_threads", {})[st.session_state.current_user] = free_thread_id(
+        st.session_state.current_user)
 
 
 def current_user():
@@ -172,6 +183,8 @@ def page_register() -> None:
 
 
 def show_message(message) -> None:
+    if getattr(message, "name", None) == REQUEST_TAG:  # 첫 질문 y를 Python이 바꾼 조사 요청(관리자가 친 말은 y)
+        return
     if isinstance(message, HumanMessage):
         st.chat_message("user").write(message.content)
     elif isinstance(message, ToolMessage):
@@ -192,18 +205,27 @@ def send(thread_id: str, text: str) -> None:
 
 
 def page_assistant() -> None:
+    """조사 비서. [이 건 조사]로 들어오면 그 이슈의 thread, 메뉴로 들어오면 이슈 없는 대화 thread(관리자별)."""
     st.header("조사 비서")
+    user_id = st.session_state.current_user
     issue_no = st.session_state.get("chat_issue")
     if issue_no is None:
-        st.info("이슈대장에서 [이 건 조사]를 눌러 대화를 시작하세요.")
-        return
-    issue = query("SELECT * FROM ISSUE WHERE ISSUE_NO = ?", (issue_no,))[0]
-    st.caption(f"이슈 #{issue_no} · {issue['VESSEL_ID']} / {issue['ACTION_SEQ']} · {issue['STATUS']} · {issue['INQUIRY']}")
-    thread_id = issue_thread_id(issue_no, st.session_state.current_user)
+        threads = st.session_state.setdefault("free_threads", {})
+        if user_id not in threads:
+            threads[user_id] = free_thread_id(user_id)
+        thread_id = threads[user_id]
+        left, right = st.columns([4, 1])
+        left.caption(f"{MODE_NAMES['none']} · thread {thread_id}")
+        right.button("새 대화", key="new_chat", on_click=new_free_chat)
+    else:
+        issue = query("SELECT * FROM ISSUE WHERE ISSUE_NO = ?", (issue_no,))[0]
+        st.caption(f"이슈 #{issue_no} · {issue['VESSEL_ID']} / {issue['ACTION_SEQ']} · {issue['STATUS']} · {issue['INQUIRY']}")
+        thread_id = issue_thread_id(issue_no, user_id)
+        left, right = st.columns([4, 1])
+        left.caption(f"{MODE_NAMES[issue_mode(issue_no)]} · thread {thread_id}")
+        right.button("이슈 없는 대화로", key="leave_issue", on_click=leave_issue_chat)
 
-    if st.session_state.pop("pending_first_turn", False):
-        send(thread_id, f"이슈 #{issue_no}을 조사해 주세요. VESSEL_ID {issue['VESSEL_ID']}, "
-                        f"ACTION_SEQ {issue['ACTION_SEQ']}, 문의내용: {issue['INQUIRY']}")
+    asyncio.run(open_thread(thread_id))  # 열린 이슈의 새 thread면 첫 질문(y/n)을 남긴다
     text = st.chat_input("비서에게 질문")
     if text:
         send(thread_id, text)
@@ -226,7 +248,7 @@ def main() -> None:
     pages = [p for p, action in PAGES.items() if can(role, action)]
     if st.session_state.get("page") not in pages:  # 권한이 없는 화면에 있던 채로 사용자를 바꾸면 이슈대장으로
         st.session_state.page = pages[0]
-    page = st.sidebar.radio("화면", pages, key="page")
+    page = st.sidebar.radio("화면", pages, key="page", on_change=leave_issue_chat)
     {"이슈대장": page_ledger, "신규 문의 등록": page_register, "조사 비서": page_assistant}[page]()
 
 

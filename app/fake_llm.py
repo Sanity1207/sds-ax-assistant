@@ -4,8 +4,8 @@
   응답 항목은 AIMessage(chat), BaseModel·dict(structured, dict는 스키마로 검사), str(structured에서는 스키마 오류),
   Exception(그 호출 실패), 또는 (messages, tools_or_schema)를 받아 위 값 중 하나를 돌려주는 함수다.
   error를 주면 모든 호출이 그 예외로 실패한다(모델 장애 흉내).
-- DemoChatModel: LLM_MODE=fake로 앱을 띄울 때 쓰는 규칙 기반 가짜. 분류는 늘 '매핑 생성', 비서는 find_vessel을
-  한 번 부른 뒤 그 결과를 답한다.
+- DemoChatModel: LLM_MODE=fake로 앱을 띄울 때 쓰는 규칙 기반 가짜. 분류는 늘 '매핑 생성', 비서는 입력에
+  이슈 번호(#N)가 있으면 get_issue, 아니면 find_vessel을 한 번 부른 뒤 그 결과를 답한다.
 """
 
 import re
@@ -68,6 +68,7 @@ def fake_llm(*models: FakeChatModel) -> FallbackLLM:
 
 
 _VESSEL_ID = re.compile(r"\bV\d{3}\b", re.IGNORECASE)
+_ISSUE_NO = re.compile(r"#(\d+)")
 
 
 class DemoChatModel:
@@ -82,10 +83,14 @@ class DemoChatModel:
             body = "\n".join(str(m.content) for m in results)
             return AIMessage(content=f"(가짜 LLM) 조사 결과입니다.\n{body}")
         names = {getattr(t, "name", None) for t in tools or []}
+        text = str(messages[last_human].content) if last_human >= 0 else ""
+        issue = _ISSUE_NO.search(text)
+        if issue and "get_issue" in names:
+            return tool_call("get_issue", {"issue_no": int(issue.group(1))})
         if "find_vessel" in names and last_human >= 0:
-            text = str(messages[last_human].content)
             found = _VESSEL_ID.search(text)
-            query = found.group(0).upper() if found else text.strip()
+            words = text.split()
+            query = found.group(0).upper() if found else (words[0] if words else "")
             return tool_call("find_vessel", {"query": query})
         return AIMessage(content="(가짜 LLM) 도구 없이 답할 수 있는 내용이 없습니다.")
 

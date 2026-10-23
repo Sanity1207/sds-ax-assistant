@@ -64,7 +64,7 @@
 
 - [x] **T17 읽기 도구 6개 완성** — find_vessel·find_action(일부 검색, 빈 검색어 = 전체+개수), get_vessel_mappings(빈 값 = 전체), list_issues, get_issue, get_issue_trace. 정해진 형식 문자열, 오류는 `[오류]`로 시작하는 안내(받은 값·쓸 수 있는 값·다음 행동). 검색 0건은 정상.
   - 확인: `pytest -q tests/test_mcp.py` — 도구별 정상·오류 사례, TOOL_SPECS/TOOLS_IMPL 이름 일치
-- [ ] **T18 대화 모드·thread·첫 질문** — log_resolution 추가. 모드별 도구 목록(열린 이슈 / 닫힌 이슈 / 이슈 없음)을 Python이 결정. thread ID 규칙((이슈, 관리자), `free-<관리자>-<YYYYMMDD-HHMMSS>`, [새 대화]). 열린 이슈 진입 시 y/n 첫 질문(Python 판정, 그 밖 입력은 다시 묻기).
+- [x] **T18 대화 모드·thread·첫 질문** — log_resolution 추가. 모드별 도구 목록(열린 이슈 / 닫힌 이슈 / 이슈 없음)을 Python이 결정. thread ID 규칙((이슈, 관리자), `free-<관리자>-<YYYYMMDD-HHMMSS>`, [새 대화]). 열린 이슈 진입 시 y/n 첫 질문(Python 판정, 그 밖 입력은 다시 묻기).
   - 확인: `pytest -q tests/test_agent_read.py -k mode` — 모드별 바인딩 도구 이름 집합 일치, "네"/"yes" 입력 시 다시 묻기
 - [ ] **T19 guard 조사 문서(문서 작업)** — 공개 저장소·데이터셋·OWASP LLM Top 10 조사 → `docs/guard_research.md`에 공격 유형·대응법(한/영) 정리.
   - 확인: 파일이 있고 유형별로 "예시 / 대응 규칙 / 오탐 주의" 항목이 있음
@@ -151,6 +151,7 @@ Claude Code로 구현하는 기준이다. 작업당 15~25분(작성 + 가짜 LLM
 - 2026-10-23 T16 완료: classify_issue는 관리자만(PermissionDenied)·'자동 분류 실패' 확인필요 건만(ReclassifyNotAllowed) 다시 분류. 이슈대장 상세에 관리자 전용 [다시 분류](로딩 표시, 결과는 이슈대장 위 알림), 등록 화면은 분류 실패 시 배너 없이 안내만. 분류 프롬프트 v2(<<< >>> 구분, 지시문은 요청 개수에 세지 않음). tests/test_classify.py 전체 통과
 - 2026-10-23 묶음 3(T14~T16) 완료: 결정 사항은 REPORT_묶음3.md
 - 2026-10-23 T17 완료: find_action·get_vessel_mappings·list_issues·get_issue·get_issue_trace 추가, 오류는 error()로 '[오류] 사유 · 받은 값 · 쓸 수 있는 값 · 다음 행동' 형식. issue_no는 정수·'#2'·'2'를 받고 그 밖은 안내. tests/test_mcp.py 29건
+- 2026-10-23 T18 완료: log_resolution(위험 등급 log, 화면 이슈에만, 행동한 관리자 ID 기록), MCP 서버에 APP_ACTING_USER·APP_SCREEN_ISSUE 전달, MODE_TOOLS(open/closed/none)를 대화 입력마다 DB 상태로 정함, 모드 밖 도구는 [오류]. open_thread가 열린 이슈 새 thread에 첫 질문(y/n, Python 판정, 그 밖은 다시 묻기, LLM 0회), 첫 질문 교환은 LLM 입력에서 뺌. 화면: 메뉴 진입 = 이슈 없는 대화(관리자별 free thread, [새 대화]), [이슈 없는 대화로]. tests/test_agent_read.py -k mode
 
 ## 실제 Bedrock 점검 목록
 

@@ -8,14 +8,20 @@ TOOL_SPECS는 LLM에 보이는 설명과 Python이 쓰는 위험 등급을, TOOL
 도구 결과는 비서에게 신뢰하지 않는 데이터다(문의내용 원문이 그대로 들어 있다).
 
 위험 등급: read = 조회(자동 실행) / log = 근거 남기기(승인 없이 자동, 도구 예산에는 포함) / write = 처리안(승인 필요).
+
+대화 맥락: 비서는 대화 입력 1회마다 이 서버를 새로 띄우며, 행동한 관리자와 화면의 이슈를 환경변수
+APP_ACTING_USER·APP_SCREEN_ISSUE로 넘긴다. LLM이 바꿀 수 있는 인자가 아니므로, 기록의 사용자와 '그 화면의 이슈만'
+규칙은 이 값으로 Python이 정한다.
 """
 
+import os
 import sqlite3
 from datetime import datetime
 from typing import Annotated
 
 from pydantic import Field
 
+from app.config import now_kst
 from app.db import STATUSES, connect
 from app.trace import SEED_NO_TRACE, _runs, timeline
 
@@ -68,7 +74,17 @@ TOOL_SPECS: dict[str, dict] = {
         ),
         "risk": "read",
     },
+    "log_resolution": {
+        "description": (
+            "지금 화면의 이슈에 조사 근거 메모(note)를 처리 이력에 남긴다. 처리안 없이 조사를 마칠 때 쓴다. "
+            "예: 이관 건 'VESSEL 담당자 답변 대기'. 이슈 상태와 매핑은 바꾸지 않는다. 지울 수 없는 기록이다."
+        ),
+        "risk": "log",
+    },
 }
+
+READ_TOOLS = tuple(name for name, spec in TOOL_SPECS.items() if spec["risk"] == "read")
+NOTE_MAX = 500
 
 
 def error(message: str, received=None, allowed: str | None = None, next_step: str | None = None) -> str:
@@ -319,6 +335,42 @@ def get_issue_trace(issue_no: Annotated[int | str, Field(description="이슈 번
     return "\n".join(lines)
 
 
+def screen_context() -> tuple[str | None, int | None]:
+    """(행동한 관리자 ID, 화면의 이슈 번호). 비서가 서버를 띄울 때 환경변수로 넘긴다."""
+    issue = os.getenv("APP_SCREEN_ISSUE") or ""
+    return os.getenv("APP_ACTING_USER") or None, int(issue) if issue.isdigit() else None
+
+
+def log_resolution(issue_no: Annotated[int | str, Field(description="지금 화면의 이슈 번호")],
+                   note: Annotated[str, Field(description="남길 근거 메모(한 줄~몇 줄, 500자 이내)")]) -> str:
+    user_id, screen = screen_context()
+    n = parse_issue_no(issue_no)
+    if isinstance(n, str):
+        return n
+    if screen is None:
+        return error("이슈 없는 대화에서는 처리 이력을 남길 수 없습니다.", issue_no, None,
+                     "이슈대장에서 [이 건 조사]로 그 이슈의 대화를 여세요.")
+    if n != screen:
+        return error(f"지금 화면의 이슈는 #{screen}입니다. 다른 이슈에는 기록할 수 없습니다.", issue_no, str(screen),
+                     f"issue_no={screen}으로 다시 부르세요.")
+    text = note.strip() if isinstance(note, str) else ""
+    if not text or len(text) > NOTE_MAX:
+        return error(f"note는 1~{NOTE_MAX}자 문자열이어야 합니다.", note if not isinstance(note, str) else f"{len(text)}자",
+                     f"1~{NOTE_MAX}자", "근거를 짧게 줄여 다시 부르세요.")
+    if user_id is None:
+        return error("행동한 관리자를 알 수 없어 기록하지 않았습니다.", None, None, "관리자에게 알리세요.")
+    conn = connect()
+    try:
+        if conn.execute("SELECT 1 FROM ISSUE WHERE ISSUE_NO = ?", (n,)).fetchone() is None:
+            return _issue_missing(n, conn, issue_no)
+        with conn:
+            conn.execute("INSERT INTO RESOLUTION_LOG (ISSUE_NO, KIND, CONTENT, USER_ID, LOGGED_AT) VALUES (?, 'note', ?, ?, ?)",
+                         (n, text, user_id, now_kst()))
+    finally:
+        conn.close()
+    return f"처리 이력에 기록함: #{n} · note · {user_id} · {text}"
+
+
 TOOLS_IMPL = {
     "find_vessel": find_vessel,
     "find_action": find_action,
@@ -326,6 +378,7 @@ TOOLS_IMPL = {
     "list_issues": list_issues,
     "get_issue": get_issue,
     "get_issue_trace": get_issue_trace,
+    "log_resolution": log_resolution,
 }
 
 assert set(TOOL_SPECS) == set(TOOLS_IMPL), f"TOOL_SPECS와 TOOLS_IMPL 이름 불일치: {set(TOOL_SPECS) ^ set(TOOLS_IMPL)}"
